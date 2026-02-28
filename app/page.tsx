@@ -12,7 +12,11 @@ export default async function Home() {
 
   return (
     <main className="viewerPage">
+      <header className="pageHeader">
+        <h1>Release of Information</h1>
+      </header>
       <PdfBrowser files={files} />
+      <div className="pageTag">Skelton Networks © 2026</div>
     </main>
   );
 }
