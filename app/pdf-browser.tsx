@@ -2,6 +2,18 @@
 
 import { useMemo, useState } from "react";
 import { getModuleFieldsForFile, getReadableFieldName } from "./lib/form-field-modules";
+import {
+  US_STATES,
+  addYearsToDateString,
+  buildDisplayName,
+  combineAddressParts,
+  formatDateInput,
+  formatPhoneInput,
+  formatSsnInput,
+  parseDisplayName,
+  splitAddressAndCity,
+  todayDateString
+} from "./lib/form-workflow";
 
 type PdfBrowserProps = {
   files: string[];
@@ -16,8 +28,34 @@ type FieldDescriptor = {
 };
 
 type EditorMode = "single" | "all";
+type FormKey = "csn" | "charity" | "story" | "other";
 
 type DependentFieldPart = "Name" | "Relationship" | "DOB" | "SSN";
+
+const CSN_REVOKE_ADDRESS_DEFAULT = "126 S. Kellogg, Suite 001, Ames, IA 50010";
+const CSN_HIDDEN_FIELDS = new Set([
+  "EntitiesException",
+  "EntitiesAddition",
+  "RevocationAddress",
+  "RevocationCopySent",
+  "CopyToGaurdianDate",
+  "CopyToGuardianAddress"
+]);
+
+const ALL_FORM_DESCRIPTORS: FieldDescriptor[] = [
+  { name: "allLastName", label: "Last Name", type: "text" },
+  { name: "allFirstName", label: "First Name", type: "text" },
+  { name: "allMiddleInit", label: "Middle Init", type: "text" },
+  { name: "allAddress", label: "Address", type: "text" },
+  { name: "allCity", label: "City", type: "text" },
+  { name: "allState", label: "State", type: "dropdown", options: US_STATES },
+  { name: "allZip", label: "ZIP", type: "text" },
+  { name: "allClientNum", label: "CSN Number", type: "text" },
+  { name: "allClientDOB", label: "Client DOB", type: "text" },
+  { name: "allClientPhone", label: "Client Phone", type: "text" },
+  { name: "allClientSSN", label: "SSN", type: "text" },
+  { name: "allSignedDate", label: "Signed Date", type: "text" }
+];
 
 function getFileDisplayName(file: string) {
   const normalized = file.toLowerCase();
@@ -37,9 +75,22 @@ function getFileDisplayName(file: string) {
   return file.replace(/\.pdf$/i, "");
 }
 
-function isCharityTrackerFile(file: string) {
-  const normalized = file.toLowerCase();
-  return normalized.includes("goodneighbor") || normalized.includes("charity");
+function getFormKey(fileName: string): FormKey {
+  const normalized = fileName.toLowerCase();
+
+  if (normalized.includes("csn")) {
+    return "csn";
+  }
+
+  if (normalized.includes("goodneighbor") || normalized.includes("charity")) {
+    return "charity";
+  }
+
+  if (normalized.includes("story")) {
+    return "story";
+  }
+
+  return "other";
 }
 
 function getDependentFieldMeta(fieldName: string) {
@@ -71,6 +122,19 @@ function normalizeFieldName(fieldName: string) {
     .replace(/[^a-z0-9]/g, "");
 }
 
+async function loadFieldsForFile(fileName: string) {
+  const response = await fetch(`/api/pdfs/${encodeURIComponent(fileName)}/fields`);
+  const payload = (await response.json()) as { fields?: FieldDescriptor[]; error?: string };
+  const apiFields = payload.fields ?? [];
+  const fallbackFields = getModuleFieldsForFile(fileName);
+
+  if (!response.ok) {
+    return fallbackFields;
+  }
+
+  return apiFields.length > 0 ? apiFields : fallbackFields;
+}
+
 export default function PdfBrowser({ files }: PdfBrowserProps) {
   const [selectedFile, setSelectedFile] = useState<string>(files[0] ?? "");
   const [viewerVersion, setViewerVersion] = useState<number>(0);
@@ -80,10 +144,12 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [visibleDependents, setVisibleDependents] = useState(0);
   const [fields, setFields] = useState<FieldDescriptor[]>([]);
-  const [allModeFieldMap, setAllModeFieldMap] = useState<Record<string, Record<string, string>>>({});
   const [fieldValues, setFieldValues] = useState<Record<string, string | boolean>>({});
   const [editorError, setEditorError] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
+  const [isPreparingDownload, setIsPreparingDownload] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadStatus, setDownloadStatus] = useState("");
 
   const selectedUrl = useMemo(() => {
     if (!selectedFile) {
@@ -93,32 +159,16 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
     return `/api/pdfs/${encodeURIComponent(selectedFile)}?v=${viewerVersion}`;
   }, [selectedFile, viewerVersion]);
 
-  const isCharityTracker = isCharityTrackerFile(selectedFile);
-  const shouldShowCharityDependents = editorMode === "single" && isCharityTracker;
-  const nonDependentFields = shouldShowCharityDependents
-    ? fields.filter((field) => !getDependentFieldMeta(field.name))
-    : fields;
+  const selectedFormKey = getFormKey(selectedFile);
+  const shouldShowCharityDependents = editorMode === "single" && selectedFormKey === "charity";
 
-  const getDependentField = (index: number, part: DependentFieldPart) => {
-    return fields.find((field) => {
-      const meta = getDependentFieldMeta(field.name);
-      return meta?.index === index && meta.part === part;
-    });
-  };
-
-  const dependentRows = Array.from({ length: visibleDependents }, (_value, offset) => {
-    const index = offset + 1;
-
-    return {
-      index,
-      fields: {
-        Name: getDependentField(index, "Name"),
-        Relationship: getDependentField(index, "Relationship"),
-        DOB: getDependentField(index, "DOB"),
-        SSN: getDependentField(index, "SSN")
-      }
-    };
-  }).filter((row) => Object.values(row.fields).some(Boolean));
+  const fieldsByName = useMemo(() => {
+    const map = new Map<string, FieldDescriptor>();
+    for (const field of fields) {
+      map.set(field.name, field);
+    }
+    return map;
+  }, [fields]);
 
   const createInitialValues = (descriptors: FieldDescriptor[]) => {
     const nextValues: Record<string, string | boolean> = {};
@@ -144,7 +194,55 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
     return nextValues;
   };
 
-  const getFallbackFields = (fileName: string) => getModuleFieldsForFile(fileName);
+  const normalizeInputValue = (fieldName: string, value: string | boolean) => {
+    if (typeof value !== "string") {
+      return value;
+    }
+
+    const dateFields = new Set([
+      "ClientDOB",
+      "SignedDate",
+      "AgencySignedDate",
+      "ClientSignedDate",
+      "ExpirationDate",
+      "CopyToGaurdianDate",
+      "RevocationDate",
+      "RevokeDate",
+      "allClientDOB",
+      "allSignedDate"
+    ]);
+
+    if (dateFields.has(fieldName)) {
+      return formatDateInput(value);
+    }
+
+    if (fieldName === "ClientPhone" || fieldName === "allClientPhone") {
+      return formatPhoneInput(value);
+    }
+
+    if (fieldName === "SignedTelephone") {
+      return formatPhoneInput(value);
+    }
+
+    if (fieldName === "ClientSSN" || fieldName === "allClientSSN") {
+      return formatSsnInput(value);
+    }
+
+    if (fieldName === "allZip") {
+      return value.replace(/\D/g, "").slice(0, 5);
+    }
+
+    return value;
+  };
+
+  const updateFieldValue = (fieldName: string, value: string | boolean) => {
+    const nextValue = normalizeInputValue(fieldName, value);
+
+    setFieldValues((currentValues) => ({
+      ...currentValues,
+      [fieldName]: nextValue
+    }));
+  };
 
   const openEditor = async () => {
     if (!selectedFile) {
@@ -155,34 +253,50 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
     setIsEditorOpen(true);
     setIsLoadingFields(true);
     setVisibleDependents(0);
-    setAllModeFieldMap({});
     setEditorError("");
     setSaveMessage("");
 
     try {
-      const response = await fetch(`/api/pdfs/${encodeURIComponent(selectedFile)}/fields`);
+      const descriptors = await loadFieldsForFile(selectedFile);
+      const nextValues = createInitialValues(descriptors);
+      const today = todayDateString();
 
-      const payload = (await response.json()) as { fields?: FieldDescriptor[]; error?: string };
-      const apiFields = payload.fields ?? [];
-      const fallbackFields = getFallbackFields(selectedFile);
-
-      if (!response.ok) {
-        const descriptors = fallbackFields;
-
-        setFields(descriptors);
-        setFieldValues(createInitialValues(descriptors));
-
-        if (descriptors.length === 0) {
-          throw new Error(payload.error ?? "Unable to load form fields");
+      if (selectedFormKey === "csn") {
+        if (!String(nextValues.RevokeReturnAddress ?? "").trim()) {
+          nextValues.RevokeReturnAddress = CSN_REVOKE_ADDRESS_DEFAULT;
         }
 
-        return;
+        if (!String(nextValues.SignedDate ?? "").trim()) {
+          nextValues.SignedDate = today;
+        }
       }
 
-      const descriptors = apiFields.length > 0 ? apiFields : fallbackFields;
+      if (selectedFormKey === "charity") {
+        if (!String(nextValues.ClientSignedDate ?? "").trim()) {
+          nextValues.ClientSignedDate = today;
+        }
+
+        if (!String(nextValues.AgencySignedDate ?? "").trim()) {
+          nextValues.AgencySignedDate = today;
+        }
+
+        const { address, city } = splitAddressAndCity(nextValues.ClientAddress ?? "");
+        nextValues.ClientAddress = address;
+        nextValues.ClientCity = city;
+      }
+
+      if (selectedFormKey === "story") {
+        if (!String(nextValues.SignedDate ?? "").trim()) {
+          nextValues.SignedDate = today;
+        }
+
+        if (!String(nextValues.ExpirationDate ?? "").trim()) {
+          nextValues.ExpirationDate = addYearsToDateString(String(nextValues.SignedDate), 1);
+        }
+      }
 
       setFields(descriptors);
-      setFieldValues(createInitialValues(descriptors));
+      setFieldValues(nextValues);
 
       if (descriptors.length === 0) {
         setEditorError("No fillable fields were found in this PDF.");
@@ -205,113 +319,59 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
     setIsEditorOpen(true);
     setIsLoadingFields(true);
     setVisibleDependents(0);
-    setAllModeFieldMap({});
     setEditorError("");
     setSaveMessage("");
 
     try {
-      const allResults = await Promise.all(
-        files.map(async (fileName) => {
-          const response = await fetch(`/api/pdfs/${encodeURIComponent(fileName)}/fields`);
-          const payload = (await response.json()) as { fields?: FieldDescriptor[]; error?: string };
-          const apiFields = payload.fields ?? [];
-          const fallbackFields = getFallbackFields(fileName);
-
-          if (!response.ok) {
-            return { fileName, fields: fallbackFields };
-          }
-
-          return { fileName, fields: apiFields.length > 0 ? apiFields : fallbackFields };
-        })
+      const byFileEntries = await Promise.all(
+        files.map(async (fileName) => [fileName, await loadFieldsForFile(fileName)] as const)
       );
+      const byFile = Object.fromEntries(byFileEntries) as Record<string, FieldDescriptor[]>;
 
-      const canonicalMap = new Map<
-        string,
-        {
-          displayName: string;
-          type: FieldDescriptor["type"];
-          options?: string[];
-          byFile: Record<string, string>;
-          valuesByFile: Record<string, string | boolean | undefined>;
+      const getValue = (fileKey: FormKey, fieldName: string) => {
+        const target = files.find((fileName) => getFormKey(fileName) === fileKey);
+        if (!target) {
+          return "";
         }
-      >();
 
-      for (const result of allResults) {
-        const seenForFile = new Set<string>();
+        const match = byFile[target].find((field) => normalizeFieldName(field.name) === normalizeFieldName(fieldName));
+        return typeof match?.value === "boolean" ? (match.value ? "true" : "false") : String(match?.value ?? "");
+      };
 
-        for (const descriptor of result.fields) {
-          const canonicalName = normalizeFieldName(descriptor.name);
+      const charityLast = getValue("charity", "ClientLastName");
+      const charityFirst = getValue("charity", "ClientFirstName");
+      const charityMiddle = getValue("charity", "ClientMiddleInit");
+      const fallbackParsedName = parseDisplayName(getValue("csn", "ClientName") || getValue("story", "ClientName"));
 
-          if (!canonicalName || seenForFile.has(canonicalName)) {
-            continue;
-          }
+      const charityAddressRaw = getValue("charity", "ClientAddress");
+      const splitAddress = splitAddressAndCity(charityAddressRaw);
+      const signedDateSeed =
+        getValue("charity", "ClientSignedDate") ||
+        getValue("csn", "SignedDate") ||
+        getValue("story", "SignedDate") ||
+        todayDateString();
 
-          seenForFile.add(canonicalName);
+      const allValues: Record<string, string | boolean> = {
+        allLastName: charityLast || fallbackParsedName.lastName,
+        allFirstName: charityFirst || fallbackParsedName.firstName,
+        allMiddleInit: charityMiddle || fallbackParsedName.middleInitial,
+        allAddress: splitAddress.address,
+        allCity: splitAddress.city,
+        allState: getValue("charity", "ClientState"),
+        allZip: getValue("charity", "ClientZip"),
+        allClientNum: getValue("csn", "ClientNum"),
+        allClientDOB: formatDateInput(getValue("charity", "ClientDOB") || getValue("csn", "ClientDOB") || getValue("story", "ClientDOB")),
+        allClientPhone: formatPhoneInput(getValue("charity", "ClientPhone")),
+        allClientSSN: formatSsnInput(getValue("charity", "ClientSSN")),
+        allSignedDate: formatDateInput(signedDateSeed)
+      };
 
-          const existing = canonicalMap.get(canonicalName);
-
-          if (existing) {
-            existing.byFile[result.fileName] = descriptor.name;
-            existing.valuesByFile[result.fileName] = descriptor.value;
-            continue;
-          }
-
-          canonicalMap.set(canonicalName, {
-            displayName: descriptor.label ?? getReadableFieldName(descriptor.name),
-            type: descriptor.type,
-            options: descriptor.options,
-            byFile: {
-              [result.fileName]: descriptor.name
-            },
-            valuesByFile: {
-              [result.fileName]: descriptor.value
-            }
-          });
-        }
-      }
-
-      const commonFields = Array.from(canonicalMap.entries())
-        .filter(([_canonicalName, info]) => files.every((fileName) => Boolean(info.byFile[fileName])))
-        .map(([canonicalName, info]) => {
-          const perFileValues = files.map((fileName) => info.valuesByFile[fileName]);
-          const firstValue = perFileValues[0];
-          const hasSameValue = perFileValues.every((value) => value === firstValue);
-
-          return {
-            name: canonicalName,
-            type: info.type,
-            options: info.options,
-            value: hasSameValue
-              ? firstValue
-              : info.type === "checkbox"
-                ? false
-                : ""
-          } as FieldDescriptor;
-        })
-        .sort((left, right) => left.name.localeCompare(right.name));
-
-      const nextFieldMap: Record<string, Record<string, string>> = {};
-
-      for (const descriptor of commonFields) {
-        const mapping = canonicalMap.get(descriptor.name);
-
-        if (mapping) {
-          nextFieldMap[descriptor.name] = mapping.byFile;
-        }
-      }
-
-      setFields(commonFields);
-      setAllModeFieldMap(nextFieldMap);
-      setFieldValues(createInitialValues(commonFields));
-
-      if (commonFields.length === 0) {
-        setEditorError("No common fillable fields were found across all forms.");
-      }
+      setFields(ALL_FORM_DESCRIPTORS);
+      setFieldValues(allValues);
     } catch {
+      setEditorError("Could not load all forms.");
       setFields([]);
-      setAllModeFieldMap({});
       setFieldValues({});
-      setEditorError("Could not load common fields for all forms.");
     } finally {
       setIsLoadingFields(false);
     }
@@ -321,38 +381,101 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
     setIsEditorOpen(false);
     setEditorMode("single");
     setIsSaving(false);
-    setAllModeFieldMap({});
     setEditorError("");
     setSaveMessage("");
   };
 
   const clearFields = () => {
-    setFieldValues(createClearedValues(fields));
+    const nextValues = createClearedValues(fields);
+
+    if (editorMode === "single") {
+      if (selectedFormKey === "csn") {
+        nextValues.RevokeReturnAddress = CSN_REVOKE_ADDRESS_DEFAULT;
+        nextValues.SignedDate = todayDateString();
+      }
+
+      if (selectedFormKey === "charity") {
+        nextValues.ClientSignedDate = todayDateString();
+        nextValues.AgencySignedDate = todayDateString();
+      }
+
+      if (selectedFormKey === "story") {
+        nextValues.SignedDate = todayDateString();
+        nextValues.ExpirationDate = addYearsToDateString(todayDateString(), 1);
+      }
+    }
+
+    if (editorMode === "all") {
+      nextValues.allSignedDate = todayDateString();
+    }
+
+    setFieldValues(nextValues);
     setSaveMessage("");
   };
 
   const applyChanges = async () => {
-    if (editorMode === "single" && !selectedFile) {
-      return;
-    }
-
     setIsSaving(true);
     setEditorError("");
     setSaveMessage("");
 
     try {
       if (editorMode === "all") {
+        const parsedName = {
+          lastName: String(fieldValues.allLastName ?? "").trim(),
+          firstName: String(fieldValues.allFirstName ?? "").trim(),
+          middleInitial: String(fieldValues.allMiddleInit ?? "").trim()
+        };
+        const mergedName = buildDisplayName(parsedName.lastName, parsedName.firstName, parsedName.middleInitial);
+        const signedDate = formatDateInput(String(fieldValues.allSignedDate ?? todayDateString()));
+        const expirationDate = addYearsToDateString(signedDate, 1);
+
+        const csnValues: Record<string, string | boolean> = {
+          ClientName: mergedName,
+          ClientAddress: combineAddressParts(
+            String(fieldValues.allAddress ?? ""),
+            String(fieldValues.allCity ?? ""),
+            String(fieldValues.allState ?? ""),
+            String(fieldValues.allZip ?? "")
+          ),
+          ClientNum: String(fieldValues.allClientNum ?? ""),
+          ClientDOB: formatDateInput(String(fieldValues.allClientDOB ?? "")),
+          SignedDate: signedDate,
+          RevokeReturnAddress: CSN_REVOKE_ADDRESS_DEFAULT
+        };
+
+        const charityValues: Record<string, string | boolean> = {
+          ClientLastName: parsedName.lastName,
+          ClientFirstName: parsedName.firstName,
+          ClientMiddleInit: parsedName.middleInitial,
+          ClientAddress: combineAddressParts(String(fieldValues.allAddress ?? ""), String(fieldValues.allCity ?? ""), "", ""),
+          ClientState: String(fieldValues.allState ?? ""),
+          ClientZip: String(fieldValues.allZip ?? ""),
+          ClientDOB: formatDateInput(String(fieldValues.allClientDOB ?? "")),
+          ClientPhone: formatPhoneInput(String(fieldValues.allClientPhone ?? "")),
+          ClientSSN: formatSsnInput(String(fieldValues.allClientSSN ?? "")),
+          ClientSignedDate: signedDate,
+          AgencySignedDate: signedDate
+        };
+
+        const storyValues: Record<string, string | boolean> = {
+          ClientName: mergedName,
+          ClientAddres: combineAddressParts(
+            String(fieldValues.allAddress ?? ""),
+            String(fieldValues.allCity ?? ""),
+            String(fieldValues.allState ?? ""),
+            String(fieldValues.allZip ?? "")
+          ),
+          ClientDOB: formatDateInput(String(fieldValues.allClientDOB ?? "")),
+          SignedDate: signedDate,
+          ExpirationDate: expirationDate
+        };
+
         for (const fileName of files) {
-          const valuesForFile: Record<string, string | boolean> = {};
+          const formKey = getFormKey(fileName);
+          const values = formKey === "csn" ? csnValues : formKey === "charity" ? charityValues : formKey === "story" ? storyValues : {};
 
-          for (const descriptor of fields) {
-            const rawFieldName = allModeFieldMap[descriptor.name]?.[fileName];
-
-            if (!rawFieldName) {
-              continue;
-            }
-
-            valuesForFile[rawFieldName] = fieldValues[descriptor.name] ?? "";
+          if (Object.keys(values).length === 0) {
+            continue;
           }
 
           const response = await fetch(`/api/pdfs/${encodeURIComponent(fileName)}/save`, {
@@ -360,7 +483,7 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
             headers: {
               "Content-Type": "application/json"
             },
-            body: JSON.stringify({ values: valuesForFile })
+            body: JSON.stringify({ values })
           });
 
           if (!response.ok) {
@@ -369,13 +492,70 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
             return;
           }
         }
+
+        setViewerVersion(Date.now());
+        setSaveMessage("Saved to all forms.");
+        setIsEditorOpen(false);
       } else {
+        if (!selectedFile) {
+          return;
+        }
+
+        const valuesToSave: Record<string, string | boolean> = {};
+
+        for (const field of fields) {
+          if (selectedFormKey === "csn" && CSN_HIDDEN_FIELDS.has(field.name)) {
+            continue;
+          }
+
+          if (shouldShowCharityDependents) {
+            const dependent = getDependentFieldMeta(field.name);
+
+            if (dependent && dependent.index > visibleDependents) {
+              continue;
+            }
+          }
+
+          valuesToSave[field.name] = fieldValues[field.name] ?? "";
+        }
+
+        if (selectedFormKey === "charity") {
+          valuesToSave.ClientAddress = combineAddressParts(
+            String(fieldValues.ClientAddress ?? ""),
+            String(fieldValues.ClientCity ?? ""),
+            "",
+            ""
+          );
+        }
+
+        if (selectedFormKey === "csn") {
+          valuesToSave.RevokeReturnAddress = String(fieldValues.RevokeReturnAddress ?? CSN_REVOKE_ADDRESS_DEFAULT);
+          valuesToSave.SignedDate = formatDateInput(String(fieldValues.SignedDate ?? todayDateString()));
+          valuesToSave.ClientDOB = formatDateInput(String(fieldValues.ClientDOB ?? ""));
+        }
+
+        if (selectedFormKey === "charity") {
+          valuesToSave.ClientPhone = formatPhoneInput(String(fieldValues.ClientPhone ?? ""));
+          valuesToSave.ClientSSN = formatSsnInput(String(fieldValues.ClientSSN ?? ""));
+          valuesToSave.ClientSignedDate = formatDateInput(String(fieldValues.ClientSignedDate ?? todayDateString()));
+          valuesToSave.AgencySignedDate = formatDateInput(String(fieldValues.AgencySignedDate ?? todayDateString()));
+          valuesToSave.ClientDOB = formatDateInput(String(fieldValues.ClientDOB ?? ""));
+        }
+
+        if (selectedFormKey === "story") {
+          const signedDate = formatDateInput(String(fieldValues.SignedDate ?? todayDateString()));
+          valuesToSave.SignedDate = signedDate;
+          valuesToSave.ExpirationDate = formatDateInput(String(fieldValues.ExpirationDate ?? addYearsToDateString(signedDate, 1)));
+          valuesToSave.ClientDOB = formatDateInput(String(fieldValues.ClientDOB ?? ""));
+          valuesToSave.SignedTelephone = formatPhoneInput(String(fieldValues.SignedTelephone ?? ""));
+        }
+
         const response = await fetch(`/api/pdfs/${encodeURIComponent(selectedFile)}/save`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
           },
-          body: JSON.stringify({ values: fieldValues })
+          body: JSON.stringify({ values: valuesToSave })
         });
 
         if (!response.ok) {
@@ -383,53 +563,180 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
           setEditorError(payload.error ?? "Could not apply changes to PDF.");
           return;
         }
+
+        setViewerVersion(Date.now());
+        setSaveMessage("Saved. The viewer now shows your updated form.");
+        setIsEditorOpen(false);
       }
-
-      setViewerVersion(Date.now());
-
-      setSaveMessage(
-        editorMode === "all"
-          ? "Saved to all forms. The viewer now shows your updated form. Use the viewer download button to save to Desktop."
-          : "Saved. The viewer now shows your updated form. Use the viewer download button to save to Desktop."
-      );
-      setIsEditorOpen(false);
     } catch {
-      setEditorError(
-        editorMode === "all" ? "Could not apply changes to all forms." : "Could not apply changes to PDF."
-      );
+      setEditorError(editorMode === "all" ? "Could not apply changes to all forms." : "Could not apply changes to PDF.");
     } finally {
       setIsSaving(false);
     }
   };
 
-  const updateFieldValue = (fieldName: string, value: string | boolean) => {
-    setFieldValues((currentValues) => ({
-      ...currentValues,
-      [fieldName]: value
-    }));
-  };
-
-  const downloadAllForms = () => {
+  const triggerBlobDownload = (blob: Blob, fileName: string) => {
+    const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.href = `/api/pdfs/download-all?t=${Date.now()}`;
-    link.download = "ROI-Forms-Merged.pdf";
+    link.href = objectUrl;
+    link.download = fileName;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(objectUrl);
   };
 
-  const downloadSelectedForm = () => {
+  const downloadWithProgress = async (url: string, fileName: string, preparingLabel: string) => {
+    if (isPreparingDownload) {
+      return;
+    }
+
+    setIsPreparingDownload(true);
+    setDownloadProgress(6);
+    setDownloadStatus(preparingLabel);
+
+    const pulseTimer = window.setInterval(() => {
+      setDownloadProgress((current) => Math.min(88, current + 2));
+    }, 220);
+
+    try {
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error("Download request failed");
+      }
+
+      const contentLengthHeader = response.headers.get("content-length");
+      const totalBytes = contentLengthHeader ? Number(contentLengthHeader) : 0;
+
+      if (response.body) {
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let receivedBytes = 0;
+
+        setDownloadStatus("Downloading document...");
+
+        while (true) {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            break;
+          }
+
+          if (!value) {
+            continue;
+          }
+
+          chunks.push(value);
+          receivedBytes += value.length;
+
+          if (totalBytes > 0) {
+            const percentage = Math.round((receivedBytes / totalBytes) * 100);
+            setDownloadProgress((current) => Math.max(current, Math.min(97, percentage)));
+          }
+        }
+
+        const mergedBytes = new Uint8Array(receivedBytes);
+        let byteOffset = 0;
+
+        for (const chunk of chunks) {
+          mergedBytes.set(chunk, byteOffset);
+          byteOffset += chunk.length;
+        }
+
+        const blob = new Blob([mergedBytes], { type: "application/pdf" });
+        triggerBlobDownload(blob, fileName);
+      } else {
+        const blob = await response.blob();
+        triggerBlobDownload(blob, fileName);
+      }
+
+      setDownloadProgress(100);
+      setDownloadStatus("Document ready.");
+    } catch {
+      setDownloadProgress(0);
+      setDownloadStatus("Download failed. Please try again.");
+    } finally {
+      window.clearInterval(pulseTimer);
+
+      window.setTimeout(() => {
+        setIsPreparingDownload(false);
+        setDownloadProgress(0);
+        setDownloadStatus("");
+      }, 1500);
+    }
+  };
+
+  const downloadAllForms = async () => {
+    await downloadWithProgress(
+      `/api/pdfs/download-all?t=${Date.now()}`,
+      "ROI-Forms-Merged.pdf",
+      "Preparing merged print document..."
+    );
+  };
+
+  const downloadSelectedForm = async () => {
     if (!selectedFile) {
       return;
     }
 
-    const link = document.createElement("a");
-    link.href = `/api/pdfs/${encodeURIComponent(selectedFile)}?t=${Date.now()}`;
-    link.download = selectedFile;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    await downloadWithProgress(
+      `/api/pdfs/print/${encodeURIComponent(selectedFile)}?t=${Date.now()}`,
+      selectedFile.replace(/\.pdf$/i, "") + "-print.pdf",
+      "Preparing print document..."
+    );
   };
+
+  const renderTextInput = (name: string, label: string, className = "editorField") => (
+    <label key={name} className={className}>
+      <span>{label}</span>
+      <input
+        className="editorInput"
+        type="text"
+        value={typeof fieldValues[name] === "string" ? String(fieldValues[name]) : ""}
+        onChange={(event) => updateFieldValue(name, event.target.value)}
+      />
+    </label>
+  );
+
+  const renderStateSelect = (name: string, label: string, className = "editorField") => (
+    <label key={name} className={className}>
+      <span>{label}</span>
+      <select
+        className="editorInput"
+        value={typeof fieldValues[name] === "string" ? String(fieldValues[name]) : ""}
+        onChange={(event) => updateFieldValue(name, event.target.value)}
+      >
+        <option value="">Select...</option>
+        {US_STATES.map((state) => (
+          <option key={state} value={state}>
+            {state}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
+  const getDependentField = (index: number, part: DependentFieldPart) => {
+    return fields.find((field) => {
+      const meta = getDependentFieldMeta(field.name);
+      return meta?.index === index && meta.part === part;
+    });
+  };
+
+  const dependentRows = Array.from({ length: visibleDependents }, (_value, offset) => {
+    const index = offset + 1;
+
+    return {
+      index,
+      fields: {
+        Name: getDependentField(index, "Name"),
+        Relationship: getDependentField(index, "Relationship"),
+        DOB: getDependentField(index, "DOB"),
+        SSN: getDependentField(index, "SSN")
+      }
+    };
+  }).filter((row) => Object.values(row.fields).some(Boolean));
 
   return (
     <div className="splitLayout">
@@ -468,19 +775,34 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
           <button
             type="button"
             className="editButton downloadActionButton"
-            onClick={downloadSelectedForm}
-            disabled={!selectedFile}
+            onClick={() => {
+              void downloadSelectedForm();
+            }}
+            disabled={!selectedFile || isPreparingDownload}
           >
             Download
           </button>
           <button
             type="button"
             className="editButton downloadActionButton"
-            onClick={downloadAllForms}
-            disabled={files.length === 0}
+            onClick={() => {
+              void downloadAllForms();
+            }}
+            disabled={files.length === 0 || isPreparingDownload}
           >
             Download All
           </button>
+        </div>
+
+        <div className="downloadProgressPanel" aria-live="polite">
+          <p className="downloadProgressStatus">
+            {downloadStatus || "Ready to prepare print document."}
+          </p>
+          <progress
+            className={isPreparingDownload ? "downloadProgressTrack active" : "downloadProgressTrack"}
+            value={downloadProgress}
+            max={100}
+          />
         </div>
 
         <div className="leftPaneHelp" aria-label="Run instructions">
@@ -498,141 +820,169 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
       </aside>
 
       <section className="rightPane" aria-label="PDF viewer">
-        <div className="viewerToolbar">
-          <button
-            type="button"
-            className="editButton"
-            onClick={openEditor}
-            disabled={!selectedUrl}
-          >
+        <div className="viewerToolbarRow">
+          <button type="button" className="editButton toolbarLeft" onClick={openEditor} disabled={!selectedUrl}>
             Edit Selected
           </button>
-          <button
-            type="button"
-            className="editButton"
-            onClick={openAllEditor}
-            disabled={files.length === 0}
-          >
+          <button type="button" className="editButton toolbarCenter" onClick={openAllEditor} disabled={files.length === 0}>
             Edit All Forms
           </button>
+          <span className="toolbarSpacer" aria-hidden="true" />
         </div>
-        {selectedUrl ? (
-          <iframe
-            key={selectedUrl}
-            className="pdfFrame"
-            src={selectedUrl}
-            title={selectedFile}
-          />
-        ) : (
-          <p className="emptyText">Select a PDF file to preview it.</p>
-        )}
+        {selectedUrl ? <iframe key={selectedUrl} className="pdfFrame" src={selectedUrl} title={selectedFile} /> : <p className="emptyText">Select a PDF file to preview it.</p>}
       </section>
 
       {isEditorOpen ? (
         <div className="modalOverlay" role="presentation">
           <div className="editorDialog" role="dialog" aria-modal="true" aria-labelledby="editorTitle">
-            <h3 id="editorTitle">{editorMode === "all" ? "Edit Common Fields" : "Edit Form Fields"}</h3>
-            <p className="editorSubtitle">
-              {editorMode === "all" ? "All Forms (common fields only)" : getFileDisplayName(selectedFile)}
-            </p>
+            <h3 id="editorTitle">{editorMode === "all" ? "Edit All Forms" : "Edit Form Fields"}</h3>
+            <p className="editorSubtitle">{editorMode === "all" ? "Mapped fields across CSN, Charity Tracker, and Story County" : getFileDisplayName(selectedFile)}</p>
 
             <div className="editorBody">
               {isLoadingFields ? (
                 <p className="emptyText">Loading form fields...</p>
+              ) : editorMode === "all" ? (
+                <>
+                  <div className="editorRow three">
+                    {renderTextInput("allLastName", "Last Name")}
+                    {renderTextInput("allFirstName", "First Name")}
+                    {renderTextInput("allMiddleInit", "Middle Init")}
+                  </div>
+                  <div className="editorRow four">
+                    {renderTextInput("allAddress", "Address")}
+                    {renderTextInput("allCity", "City")}
+                    {renderStateSelect("allState", "State")}
+                    {renderTextInput("allZip", "ZIP")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("allClientNum", "CSN Number")}
+                    {renderTextInput("allClientDOB", "Client DOB (mm/dd/yyyy)")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("allClientPhone", "Client Phone ((###) ###-####)")}
+                    {renderTextInput("allClientSSN", "SSN (###-##-####)")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("allSignedDate", "Signed Date (mm/dd/yyyy)")}
+                  </div>
+                </>
+              ) : selectedFormKey === "csn" ? (
+                <>
+                  <div className="editorRow">
+                    {renderTextInput("ClientName", "Client Name")}
+                    {renderTextInput("ClientAddress", "Client Address")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("ClientNum", "CSN Number")}
+                    {renderTextInput("ClientDOB", "Client DOB (mm/dd/yyyy)")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("RevokeReturnAddress", "Revoke Address")}
+                    {renderTextInput("SignedDate", "Sign Date (mm/dd/yyyy)")}
+                  </div>
+                </>
+              ) : selectedFormKey === "charity" ? (
+                <>
+                  <p className="formSectionLabel">Client Information</p>
+                  <div className="editorRow three">
+                    {renderTextInput("ClientLastName", "Last Name")}
+                    {renderTextInput("ClientFirstName", "First Name")}
+                    {renderTextInput("ClientMiddleInit", "Middle Init")}
+                  </div>
+                  <div className="editorRow three">
+                    {renderTextInput("ClientAddress", "Address")}
+                    {renderTextInput("ClientCity", "City")}
+                    {renderStateSelect("ClientState", "State")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("ClientZip", "ZIP")}
+                    {renderTextInput("ClientDOB", "Client DOB (mm/dd/yyyy)")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("ClientPhone", "Phone ((###) ###-####)")}
+                    {renderTextInput("ClientSSN", "SSN (###-##-####)")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("ClientSignedDate", "Client Signed Date (mm/dd/yyyy)")}
+                    {renderTextInput("AgencySignedDate", "Agency Signed Date (mm/dd/yyyy)")}
+                  </div>
+
+                  <div className="dependentRows">
+                    <div className="dependentActions">
+                      <button
+                        type="button"
+                        className="dependentAddButton"
+                        onClick={() => setVisibleDependents((currentCount) => Math.min(5, currentCount + 1))}
+                        disabled={visibleDependents >= 5}
+                      >
+                        Add Dependent
+                      </button>
+                    </div>
+
+                    {dependentRows.map((row) => (
+                      <div key={`dependent-${row.index}`} className="dependentRow">
+                        {(["Name", "Relationship", "DOB", "SSN"] as DependentFieldPart[]).map((part) => {
+                          const field = row.fields[part];
+
+                          if (!field) {
+                            return <div key={`dependent-${row.index}-${part}`} />;
+                          }
+
+                          return renderTextInput(field.name, part, "editorField dependentField");
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : selectedFormKey === "story" ? (
+                <>
+                  <div className="editorRow">
+                    {renderTextInput("ClientName", "Client Name")}
+                    {renderTextInput("ClientAddres", "Client Address")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("ClientDOB", "Client DOB (mm/dd/yyyy)")}
+                    {renderTextInput("SignedName", "Staff Singing")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("SignedDate", "Signed Date (mm/dd/yyyy)")}
+                    {renderTextInput("ExpirationDate", "Expiration Date (mm/dd/yyyy)")}
+                  </div>
+                  <div className="editorRow">
+                    {renderTextInput("SignedTelephone", "Phone ((###) ###-####)")}
+                    <div />
+                  </div>
+                </>
               ) : fields.length === 0 ? (
                 <p className="emptyText">No fillable fields were found in this PDF.</p>
               ) : (
-                <>
-                  <div className="fieldGrid">
-                    {nonDependentFields.map((field) => {
-                    const currentValue = fieldValues[field.name];
+                <div className="fieldGrid">
+                  {fields.map((field) => {
                     const label = field.label ?? getReadableFieldName(field.name);
+                    const currentValue = fieldValues[field.name];
 
                     if (field.type === "checkbox") {
                       return (
                         <label key={field.name} className="editorCheckbox">
-                          <input
-                            type="checkbox"
-                            checked={Boolean(currentValue)}
-                            onChange={(event) => updateFieldValue(field.name, event.target.checked)}
-                          />
+                          <input type="checkbox" checked={Boolean(currentValue)} onChange={(event) => updateFieldValue(field.name, event.target.checked)} />
                           <span>{label}</span>
                         </label>
                       );
                     }
 
-                    const hasOptions = Boolean(field.options && field.options.length > 0);
-
                     return (
                       <label key={field.name} className="editorField">
                         <span>{label}</span>
-                        {hasOptions ? (
-                          <select
-                            className="editorInput"
-                            value={typeof currentValue === "string" ? currentValue : ""}
-                            onChange={(event) => updateFieldValue(field.name, event.target.value)}
-                          >
-                            <option value="">Select...</option>
-                            {field.options?.map((option) => (
-                              <option key={`${field.name}-${option}`} value={option}>
-                                {option}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <input
-                            className="editorInput"
-                            type="text"
-                            value={typeof currentValue === "string" ? currentValue : ""}
-                            onChange={(event) => updateFieldValue(field.name, event.target.value)}
-                          />
-                        )}
+                        <input
+                          className="editorInput"
+                          type="text"
+                          value={typeof currentValue === "string" ? currentValue : ""}
+                          onChange={(event) => updateFieldValue(field.name, event.target.value)}
+                        />
                       </label>
                     );
-                    })}
-                  </div>
-
-                  {shouldShowCharityDependents ? (
-                    <div className="dependentRows">
-                      <div className="dependentActions">
-                        <button
-                          type="button"
-                          className="secondaryButton"
-                          onClick={() => setVisibleDependents((currentCount) => Math.min(5, currentCount + 1))}
-                          disabled={visibleDependents >= 5}
-                        >
-                          Add a Dependent
-                        </button>
-                      </div>
-
-                      {dependentRows.map((row) => (
-                        <div key={`dependent-${row.index}`} className="dependentRow">
-                          {(["Name", "Relationship", "DOB", "SSN"] as DependentFieldPart[]).map((part) => {
-                            const field = row.fields[part];
-
-                            if (!field) {
-                              return <div key={`dependent-${row.index}-${part}`} />;
-                            }
-
-                            const currentValue = fieldValues[field.name];
-
-                            return (
-                              <label key={field.name} className="editorField dependentField">
-                                <span>{part}</span>
-                                <input
-                                  className="editorInput"
-                                  type="text"
-                                  value={typeof currentValue === "string" ? currentValue : ""}
-                                  onChange={(event) => updateFieldValue(field.name, event.target.value)}
-                                />
-                              </label>
-                            );
-                          })}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </>
+                  })}
+                </div>
               )}
             </div>
 
@@ -642,28 +992,13 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
             </div>
 
             <div className="editorActions">
-              <button
-                type="button"
-                className="editButton"
-                onClick={applyChanges}
-                disabled={isSaving || isLoadingFields || !!editorError}
-              >
+              <button type="button" className="editButton" onClick={applyChanges} disabled={isSaving || isLoadingFields || !!editorError}>
                 {isSaving ? "Saving..." : "Save"}
               </button>
-              <button
-                type="button"
-                className="secondaryButton"
-                onClick={clearFields}
-                disabled={isSaving || isLoadingFields || fields.length === 0}
-              >
+              <button type="button" className="secondaryButton" onClick={clearFields} disabled={isSaving || isLoadingFields || fields.length === 0}>
                 Clear Fields
               </button>
-              <button
-                type="button"
-                className="secondaryButton"
-                onClick={closeEditor}
-                disabled={isSaving}
-              >
+              <button type="button" className="secondaryButton" onClick={closeEditor} disabled={isSaving}>
                 Cancel
               </button>
             </div>

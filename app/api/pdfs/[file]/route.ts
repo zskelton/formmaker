@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { PDFDocument } from "pdf-lib";
+import { toImageBackedPdfBytes } from "../../../lib/pdf-print-safe";
 
 type RouteContext = {
   params: Promise<{ file: string }>;
@@ -30,14 +31,15 @@ export async function GET(_request: Request, context: RouteContext) {
         const filePath = path.join(dataDir, pdfFile);
         const content = await readFile(filePath);
         const sourcePdf = await PDFDocument.load(content);
-        const copiedPages = await mergedPdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
 
+        const copiedPages = await mergedPdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
         for (const page of copiedPages) {
           mergedPdf.addPage(page);
         }
       }
 
-      const mergedPdfBytes = await mergedPdf.save();
+      const flattenedBytes = await mergedPdf.save({ useObjectStreams: false });
+      const mergedPdfBytes = await toImageBackedPdfBytes(flattenedBytes);
 
       return new Response(Buffer.from(mergedPdfBytes), {
         status: 200,

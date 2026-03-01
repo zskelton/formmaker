@@ -113,7 +113,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
     }
 
-    const outputPdfBytes = await pdfDoc.save();
+    const outputPdfBytes = await pdfDoc.save({ useObjectStreams: false });
     await writeFile(resolved.filePath, outputPdfBytes);
 
     return Response.json({ ok: true, updatedAt: Date.now() });

@@ -13,9 +13,11 @@
     "build:desktop": "npm run build && electron-builder"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.95",
     "jszip": "^3.10.1",
     "next": "^15.0.0",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.4.624",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "vinext": "^0.0.15"

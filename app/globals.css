@@ -74,13 +74,24 @@ body {
   background: #fbf6da;
 }
 
-.viewerToolbar {
-  display: flex;
-  flex-direction: column;
+.viewerToolbarRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
   align-items: center;
-  justify-content: center;
   gap: 0.6rem;
   margin-bottom: 0.75rem;
+}
+
+.toolbarLeft {
+  justify-self: start;
+}
+
+.toolbarCenter {
+  justify-self: center;
+}
+
+.toolbarSpacer {
+  justify-self: end;
 }
 
 .fileList {
@@ -107,8 +118,55 @@ body {
   font-weight: 700;
 }
 
-.leftPaneHelp {
+.downloadProgressPanel {
   margin-top: auto;
+  margin-bottom: 0.65rem;
+  padding: 0.55rem 0.55rem 0.45rem;
+  border: 1px solid var(--c4);
+  border-radius: 8px;
+  background: #f3ebca;
+}
+
+.downloadProgressStatus {
+  margin: 0 0 0.4rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #4b4330;
+}
+
+.downloadProgressTrack {
+  width: 100%;
+  height: 9px;
+  border-radius: 99px;
+  border: 1px solid #9a875f;
+  background: #fef7e3;
+  overflow: hidden;
+  appearance: none;
+}
+
+.downloadProgressTrack::-webkit-progress-bar {
+  background: #fef7e3;
+  border-radius: 99px;
+}
+
+.downloadProgressTrack::-webkit-progress-value {
+  background: linear-gradient(90deg, var(--c1), var(--c5));
+  border-radius: 99px;
+  transition: width 0.25s ease;
+}
+
+.downloadProgressTrack::-moz-progress-bar {
+  background: linear-gradient(90deg, var(--c1), var(--c5));
+  border-radius: 99px;
+  transition: width 0.25s ease;
+}
+
+.downloadProgressTrack.active {
+  box-shadow: 0 0 0 1px rgba(188, 108, 37, 0.25), 0 0 8px rgba(96, 108, 56, 0.35);
+}
+
+.leftPaneHelp {
+  margin-top: 0;
   margin-bottom: 0;
 }
 
@@ -279,6 +337,22 @@ body {
   margin: 0.45rem 0 0.2rem;
 }
 
+.dependentAddButton {
+  border: 1px solid var(--c1);
+  background: #c9d1a8;
+  color: var(--c2);
+  padding: 0.58rem 1rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dependentAddButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .dependentRows {
   margin-top: 0.55rem;
 }
@@ -299,6 +373,28 @@ body {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem 0.65rem;
   margin-top: 0.2rem;
+}
+
+.editorRow {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem 0.65rem;
+  margin-bottom: 0.45rem;
+}
+
+.editorRow.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.editorRow.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.formSectionLabel {
+  margin: 0.2rem 0 0.45rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--c2);
 }
 
 .editorField {
@@ -361,6 +457,12 @@ body {
 
 @media (max-width: 900px) {
   .fieldGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .editorRow,
+  .editorRow.three,
+  .editorRow.four {
     grid-template-columns: 1fr;
   }
 }
