@@ -1,5 +1,5 @@
 {
-  "name": "formmaker_ai",
+  "name": "formmaker",
   "private": true,
   "main": "electron/main.cjs",
   "type": "module",
@@ -8,7 +8,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "check": "vinext check",
-    "dev:desktop": "concurrently -k --success first \"npm run dev -- --port 3417 --strictPort\" \"wait-on http://localhost:3417 && cross-env VITE_DEV_SERVER_URL=http://localhost:3417 electron .\"",
+    "dev:desktop": "concurrently -k --success first \"npm run dev -- --port 3417 --strict-port\" \"wait-on http://localhost:3417 && cross-env VITE_DEV_SERVER_URL=http://localhost:3417 electron .\"",
     "start:desktop": "electron .",
     "build:desktop": "npm run build && electron-builder"
   },
@@ -52,6 +52,7 @@
       "vite.config.ts"
     ],
     "win": {
+      "icon": "app/icon.png",
       "target": "nsis"
     }
   }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { getModuleFieldsForFile, getReadableFieldName } from "./lib/form-field-modules";
 
 type PdfBrowserProps = {
   files: string[];
@@ -8,75 +9,15 @@ type PdfBrowserProps = {
 
 type FieldDescriptor = {
   name: string;
+  label?: string;
   type: "text" | "checkbox" | "dropdown" | "optionList" | "radio";
   options?: string[];
   value?: string | boolean;
 };
 
-type DependentFieldPart = "Name" | "Relationship" | "DOB" | "SSN";
+type EditorMode = "single" | "all";
 
-const FALLBACK_FIELDS_BY_FILE: Record<string, FieldDescriptor[]> = {
-  "csn_roi.pdf": [
-    "ClientNum",
-    "ClientName",
-    "ClientAddress",
-    "EntitiesAddition",
-    "EntitiesException",
-    "ClientDOB",
-    "RevocationAddress",
-    "RevocationCopySent",
-    "RevocationDate",
-    "RevokeReturnAddress",
-    "SignedDate",
-    "SignedPrintName",
-    "SignedTelephone",
-    "CopyToGuardianAddress",
-    "CopyToGaurdianDate"
-  ].map((name) => ({ name, type: "text" })),
-  "goodneighbor_roi.pdf": [
-    "ClientLastName",
-    "ClientFirstName",
-    "ClientMiddleInit",
-    "ClientState",
-    "ClientZip",
-    "ClientAddress",
-    "ClientDOB",
-    "ClientSSN",
-    "ClientPhone",
-    "Dep1Name",
-    "Dep1DOB",
-    "Dep2Name",
-    "Dep1SSN",
-    "Dep3Name",
-    "Dep4Name",
-    "Dep5Name",
-    "Dep1Relationship",
-    "Dep2Relationship",
-    "Dep4Relationship",
-    "Dep3Relationship",
-    "Dep5Relationship",
-    "Dep2DOB",
-    "Dep3DOB",
-    "Dep4DOB",
-    "Dep2SSN",
-    "Dep3SSN",
-    "Dep5SSN",
-    "Dep4SSN",
-    "Dep5DOB",
-    "AgencySignedDate",
-    "ClientSignedDate"
-  ].map((name) => ({ name, type: "text" })),
-  "storycounty_roi.pdf": [
-    "RevokeDate",
-    "SignedDate",
-    "SignedName",
-    "SignedTelephone",
-    "ExpirationDate",
-    "ClientName",
-    "ClientAddres",
-    "ClientDOB"
-  ].map((name) => ({ name, type: "text" }))
-};
+type DependentFieldPart = "Name" | "Relationship" | "DOB" | "SSN";
 
 function getFileDisplayName(file: string) {
   const normalized = file.toLowerCase();
@@ -122,33 +63,24 @@ function getDependentFieldMeta(fieldName: string) {
   return { index, part };
 }
 
-function getReadableFieldName(fieldName: string) {
-  const corrected = fieldName
-    .replace(/Gaurdian/gi, "Guardian")
-    .replace(/Addres$/i, "Address");
-
-  const withSpaces = corrected
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/([A-Za-z])(\d)/g, "$1 $2")
-    .replace(/(\d)([A-Za-z])/g, "$1 $2")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return withSpaces
-    .replace(/\bDob\b/g, "DOB")
-    .replace(/\bSsn\b/g, "SSN")
-    .replace(/\bZip\b/g, "ZIP")
-    .replace(/\bId\b/g, "ID");
+function normalizeFieldName(fieldName: string) {
+  return fieldName
+    .toLowerCase()
+    .replace(/gaurdian/g, "guardian")
+    .replace(/addres$/g, "address")
+    .replace(/[^a-z0-9]/g, "");
 }
 
 export default function PdfBrowser({ files }: PdfBrowserProps) {
   const [selectedFile, setSelectedFile] = useState<string>(files[0] ?? "");
   const [viewerVersion, setViewerVersion] = useState<number>(0);
+  const [editorMode, setEditorMode] = useState<EditorMode>("single");
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isLoadingFields, setIsLoadingFields] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [visibleDependents, setVisibleDependents] = useState(0);
   const [fields, setFields] = useState<FieldDescriptor[]>([]);
+  const [allModeFieldMap, setAllModeFieldMap] = useState<Record<string, Record<string, string>>>({});
   const [fieldValues, setFieldValues] = useState<Record<string, string | boolean>>({});
   const [editorError, setEditorError] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
@@ -162,7 +94,8 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
   }, [selectedFile, viewerVersion]);
 
   const isCharityTracker = isCharityTrackerFile(selectedFile);
-  const nonDependentFields = isCharityTracker
+  const shouldShowCharityDependents = editorMode === "single" && isCharityTracker;
+  const nonDependentFields = shouldShowCharityDependents
     ? fields.filter((field) => !getDependentFieldMeta(field.name))
     : fields;
 
@@ -211,16 +144,18 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
     return nextValues;
   };
 
-  const getFallbackFields = (fileName: string) => FALLBACK_FIELDS_BY_FILE[fileName.toLowerCase()] ?? [];
+  const getFallbackFields = (fileName: string) => getModuleFieldsForFile(fileName);
 
   const openEditor = async () => {
     if (!selectedFile) {
       return;
     }
 
+    setEditorMode("single");
     setIsEditorOpen(true);
     setIsLoadingFields(true);
     setVisibleDependents(0);
+    setAllModeFieldMap({});
     setEditorError("");
     setSaveMessage("");
 
@@ -261,9 +196,132 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
     }
   };
 
+  const openAllEditor = async () => {
+    if (files.length === 0) {
+      return;
+    }
+
+    setEditorMode("all");
+    setIsEditorOpen(true);
+    setIsLoadingFields(true);
+    setVisibleDependents(0);
+    setAllModeFieldMap({});
+    setEditorError("");
+    setSaveMessage("");
+
+    try {
+      const allResults = await Promise.all(
+        files.map(async (fileName) => {
+          const response = await fetch(`/api/pdfs/${encodeURIComponent(fileName)}/fields`);
+          const payload = (await response.json()) as { fields?: FieldDescriptor[]; error?: string };
+          const apiFields = payload.fields ?? [];
+          const fallbackFields = getFallbackFields(fileName);
+
+          if (!response.ok) {
+            return { fileName, fields: fallbackFields };
+          }
+
+          return { fileName, fields: apiFields.length > 0 ? apiFields : fallbackFields };
+        })
+      );
+
+      const canonicalMap = new Map<
+        string,
+        {
+          displayName: string;
+          type: FieldDescriptor["type"];
+          options?: string[];
+          byFile: Record<string, string>;
+          valuesByFile: Record<string, string | boolean | undefined>;
+        }
+      >();
+
+      for (const result of allResults) {
+        const seenForFile = new Set<string>();
+
+        for (const descriptor of result.fields) {
+          const canonicalName = normalizeFieldName(descriptor.name);
+
+          if (!canonicalName || seenForFile.has(canonicalName)) {
+            continue;
+          }
+
+          seenForFile.add(canonicalName);
+
+          const existing = canonicalMap.get(canonicalName);
+
+          if (existing) {
+            existing.byFile[result.fileName] = descriptor.name;
+            existing.valuesByFile[result.fileName] = descriptor.value;
+            continue;
+          }
+
+          canonicalMap.set(canonicalName, {
+            displayName: descriptor.label ?? getReadableFieldName(descriptor.name),
+            type: descriptor.type,
+            options: descriptor.options,
+            byFile: {
+              [result.fileName]: descriptor.name
+            },
+            valuesByFile: {
+              [result.fileName]: descriptor.value
+            }
+          });
+        }
+      }
+
+      const commonFields = Array.from(canonicalMap.entries())
+        .filter(([_canonicalName, info]) => files.every((fileName) => Boolean(info.byFile[fileName])))
+        .map(([canonicalName, info]) => {
+          const perFileValues = files.map((fileName) => info.valuesByFile[fileName]);
+          const firstValue = perFileValues[0];
+          const hasSameValue = perFileValues.every((value) => value === firstValue);
+
+          return {
+            name: canonicalName,
+            type: info.type,
+            options: info.options,
+            value: hasSameValue
+              ? firstValue
+              : info.type === "checkbox"
+                ? false
+                : ""
+          } as FieldDescriptor;
+        })
+        .sort((left, right) => left.name.localeCompare(right.name));
+
+      const nextFieldMap: Record<string, Record<string, string>> = {};
+
+      for (const descriptor of commonFields) {
+        const mapping = canonicalMap.get(descriptor.name);
+
+        if (mapping) {
+          nextFieldMap[descriptor.name] = mapping.byFile;
+        }
+      }
+
+      setFields(commonFields);
+      setAllModeFieldMap(nextFieldMap);
+      setFieldValues(createInitialValues(commonFields));
+
+      if (commonFields.length === 0) {
+        setEditorError("No common fillable fields were found across all forms.");
+      }
+    } catch {
+      setFields([]);
+      setAllModeFieldMap({});
+      setFieldValues({});
+      setEditorError("Could not load common fields for all forms.");
+    } finally {
+      setIsLoadingFields(false);
+    }
+  };
+
   const closeEditor = () => {
     setIsEditorOpen(false);
+    setEditorMode("single");
     setIsSaving(false);
+    setAllModeFieldMap({});
     setEditorError("");
     setSaveMessage("");
   };
@@ -274,7 +332,7 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
   };
 
   const applyChanges = async () => {
-    if (!selectedFile) {
+    if (editorMode === "single" && !selectedFile) {
       return;
     }
 
@@ -283,26 +341,62 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
     setSaveMessage("");
 
     try {
-      const response = await fetch(`/api/pdfs/${encodeURIComponent(selectedFile)}/save`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ values: fieldValues })
-      });
+      if (editorMode === "all") {
+        for (const fileName of files) {
+          const valuesForFile: Record<string, string | boolean> = {};
 
-      if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
-        setEditorError(payload.error ?? "Could not apply changes to PDF.");
-        return;
+          for (const descriptor of fields) {
+            const rawFieldName = allModeFieldMap[descriptor.name]?.[fileName];
+
+            if (!rawFieldName) {
+              continue;
+            }
+
+            valuesForFile[rawFieldName] = fieldValues[descriptor.name] ?? "";
+          }
+
+          const response = await fetch(`/api/pdfs/${encodeURIComponent(fileName)}/save`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ values: valuesForFile })
+          });
+
+          if (!response.ok) {
+            const payload = (await response.json()) as { error?: string };
+            setEditorError(payload.error ?? `Could not apply changes to ${getFileDisplayName(fileName)}.`);
+            return;
+          }
+        }
+      } else {
+        const response = await fetch(`/api/pdfs/${encodeURIComponent(selectedFile)}/save`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ values: fieldValues })
+        });
+
+        if (!response.ok) {
+          const payload = (await response.json()) as { error?: string };
+          setEditorError(payload.error ?? "Could not apply changes to PDF.");
+          return;
+        }
       }
 
       setViewerVersion(Date.now());
 
-      setSaveMessage("Saved. The viewer now shows your updated form. Use the viewer download button to save to Desktop.");
+      setSaveMessage(
+        editorMode === "all"
+          ? "Saved to all forms. The viewer now shows your updated form. Use the viewer download button to save to Desktop."
+          : "Saved. The viewer now shows your updated form. Use the viewer download button to save to Desktop."
+      );
       setIsEditorOpen(false);
     } catch {
-      setEditorError("Could not apply changes to PDF.");
+      setEditorError(
+        editorMode === "all" ? "Could not apply changes to all forms." : "Could not apply changes to PDF."
+      );
     } finally {
       setIsSaving(false);
     }
@@ -413,6 +507,14 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
           >
             Edit Selected
           </button>
+          <button
+            type="button"
+            className="editButton"
+            onClick={openAllEditor}
+            disabled={files.length === 0}
+          >
+            Edit All Forms
+          </button>
         </div>
         {selectedUrl ? (
           <iframe
@@ -429,8 +531,10 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
       {isEditorOpen ? (
         <div className="modalOverlay" role="presentation">
           <div className="editorDialog" role="dialog" aria-modal="true" aria-labelledby="editorTitle">
-            <h3 id="editorTitle">Edit Form Fields</h3>
-            <p className="editorSubtitle">{getFileDisplayName(selectedFile)}</p>
+            <h3 id="editorTitle">{editorMode === "all" ? "Edit Common Fields" : "Edit Form Fields"}</h3>
+            <p className="editorSubtitle">
+              {editorMode === "all" ? "All Forms (common fields only)" : getFileDisplayName(selectedFile)}
+            </p>
 
             <div className="editorBody">
               {isLoadingFields ? (
@@ -442,7 +546,7 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
                   <div className="fieldGrid">
                     {nonDependentFields.map((field) => {
                     const currentValue = fieldValues[field.name];
-                    const label = getReadableFieldName(field.name);
+                    const label = field.label ?? getReadableFieldName(field.name);
 
                     if (field.type === "checkbox") {
                       return (
@@ -488,7 +592,7 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
                     })}
                   </div>
 
-                  {isCharityTracker ? (
+                  {shouldShowCharityDependents ? (
                     <div className="dependentRows">
                       <div className="dependentActions">
                         <button

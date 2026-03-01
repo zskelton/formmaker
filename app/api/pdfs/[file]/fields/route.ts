@@ -8,6 +8,7 @@ import {
   PDFRadioGroup,
   PDFTextField
 } from "pdf-lib";
+import { getModuleFieldsForFile } from "../../../../lib/form-field-modules";
 
 type RouteContext = {
   params: Promise<{ file: string }>;
@@ -15,72 +16,10 @@ type RouteContext = {
 
 type FieldDescriptor = {
   name: string;
+  label?: string;
   type: "text" | "checkbox" | "dropdown" | "optionList" | "radio";
   options?: string[];
   value?: string | boolean;
-};
-
-const FALLBACK_FIELDS_BY_FILE: Record<string, FieldDescriptor[]> = {
-  "csn_roi.pdf": [
-    "ClientNum",
-    "ClientName",
-    "ClientAddress",
-    "EntitiesAddition",
-    "EntitiesException",
-    "ClientDOB",
-    "RevocationAddress",
-    "RevocationCopySent",
-    "RevocationDate",
-    "RevokeReturnAddress",
-    "SignedDate",
-    "SignedPrintName",
-    "SignedTelephone",
-    "CopyToGuardianAddress",
-    "CopyToGaurdianDate"
-  ].map((name) => ({ name, type: "text" })),
-  "goodneighbor_roi.pdf": [
-    "ClientLastName",
-    "ClientFirstName",
-    "ClientMiddleInit",
-    "ClientState",
-    "ClientZip",
-    "ClientAddress",
-    "ClientDOB",
-    "ClientSSN",
-    "ClientPhone",
-    "Dep1Name",
-    "Dep1DOB",
-    "Dep2Name",
-    "Dep1SSN",
-    "Dep3Name",
-    "Dep4Name",
-    "Dep5Name",
-    "Dep1Relationship",
-    "Dep2Relationship",
-    "Dep4Relationship",
-    "Dep3Relationship",
-    "Dep5Relationship",
-    "Dep2DOB",
-    "Dep3DOB",
-    "Dep4DOB",
-    "Dep2SSN",
-    "Dep3SSN",
-    "Dep5SSN",
-    "Dep4SSN",
-    "Dep5DOB",
-    "AgencySignedDate",
-    "ClientSignedDate"
-  ].map((name) => ({ name, type: "text" })),
-  "storycounty_roi.pdf": [
-    "RevokeDate",
-    "SignedDate",
-    "SignedName",
-    "SignedTelephone",
-    "ExpirationDate",
-    "ClientName",
-    "ClientAddres",
-    "ClientDOB"
-  ].map((name) => ({ name, type: "text" }))
 };
 
 function resolvePdfPath(rawFile: string) {
@@ -167,11 +106,11 @@ export async function GET(_request: Request, context: RouteContext) {
       return Response.json({ fields });
     }
 
-    const fallbackFields = FALLBACK_FIELDS_BY_FILE[resolved.decodedFile.toLowerCase()] ?? [];
+    const fallbackFields = getModuleFieldsForFile(resolved.decodedFile);
 
     return Response.json({ fields: fallbackFields });
   } catch {
-    const fallbackFields = FALLBACK_FIELDS_BY_FILE[resolved.decodedFile.toLowerCase()] ?? [];
+    const fallbackFields = getModuleFieldsForFile(resolved.decodedFile);
 
     if (fallbackFields.length > 0) {
       return Response.json({ fields: fallbackFields });

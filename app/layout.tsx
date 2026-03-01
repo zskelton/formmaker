@@ -2,8 +2,12 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Vinext Boilerplate",
-  description: "Next.js app running with vinext"
+  title: "Formmaker",
+  description: "Formmaker",
+  applicationName: "Formmaker",
+  icons: {
+    icon: "/icon.png"
+  }
 };
 
 export default function RootLayout({
