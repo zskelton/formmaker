@@ -122,6 +122,42 @@ function normalizeFieldName(fieldName: string) {
     .replace(/[^a-z0-9]/g, "");
 }
 
+function splitCityState(value: string) {
+  const text = String(value ?? "").trim();
+
+  if (!text) {
+    return { city: "", state: "" };
+  }
+
+  const parts = text
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) {
+    return {
+      city: parts.slice(0, -1).join(", "),
+      state: parts[parts.length - 1] ?? ""
+    };
+  }
+
+  return {
+    city: "",
+    state: text
+  };
+}
+
+function mergeCityState(city: string, state: string) {
+  const cityText = String(city ?? "").trim();
+  const stateText = String(state ?? "").trim();
+
+  if (cityText && stateText) {
+    return `${cityText}, ${stateText}`;
+  }
+
+  return cityText || stateText;
+}
+
 async function loadFieldsForFile(fileName: string) {
   const response = await fetch(`/api/pdfs/${encodeURIComponent(fileName)}/fields`);
   const payload = (await response.json()) as { fields?: FieldDescriptor[]; error?: string };
@@ -281,8 +317,10 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
         }
 
         const { address, city } = splitAddressAndCity(nextValues.ClientAddress ?? "");
+        const parsedCityState = splitCityState(String(nextValues.ClientState ?? ""));
         nextValues.ClientAddress = address;
-        nextValues.ClientCity = city;
+        nextValues.ClientCity = parsedCityState.city || city;
+        nextValues.ClientState = parsedCityState.state;
       }
 
       if (selectedFormKey === "story") {
@@ -345,6 +383,7 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
 
       const charityAddressRaw = getValue("charity", "ClientAddress");
       const splitAddress = splitAddressAndCity(charityAddressRaw);
+      const parsedCityState = splitCityState(getValue("charity", "ClientState"));
       const signedDateSeed =
         getValue("charity", "ClientSignedDate") ||
         getValue("csn", "SignedDate") ||
@@ -356,8 +395,8 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
         allFirstName: charityFirst || fallbackParsedName.firstName,
         allMiddleInit: charityMiddle || fallbackParsedName.middleInitial,
         allAddress: splitAddress.address,
-        allCity: splitAddress.city,
-        allState: getValue("charity", "ClientState"),
+        allCity: parsedCityState.city || splitAddress.city,
+        allState: parsedCityState.state,
         allZip: getValue("charity", "ClientZip"),
         allClientNum: getValue("csn", "ClientNum"),
         allClientDOB: formatDateInput(getValue("charity", "ClientDOB") || getValue("csn", "ClientDOB") || getValue("story", "ClientDOB")),
@@ -447,8 +486,8 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
           ClientLastName: parsedName.lastName,
           ClientFirstName: parsedName.firstName,
           ClientMiddleInit: parsedName.middleInitial,
-          ClientAddress: combineAddressParts(String(fieldValues.allAddress ?? ""), String(fieldValues.allCity ?? ""), "", ""),
-          ClientState: String(fieldValues.allState ?? ""),
+          ClientAddress: String(fieldValues.allAddress ?? ""),
+          ClientState: mergeCityState(String(fieldValues.allCity ?? ""), String(fieldValues.allState ?? "")),
           ClientZip: String(fieldValues.allZip ?? ""),
           ClientDOB: formatDateInput(String(fieldValues.allClientDOB ?? "")),
           ClientPhone: formatPhoneInput(String(fieldValues.allClientPhone ?? "")),
@@ -520,11 +559,10 @@ export default function PdfBrowser({ files }: PdfBrowserProps) {
         }
 
         if (selectedFormKey === "charity") {
-          valuesToSave.ClientAddress = combineAddressParts(
-            String(fieldValues.ClientAddress ?? ""),
+          valuesToSave.ClientAddress = String(fieldValues.ClientAddress ?? "");
+          valuesToSave.ClientState = mergeCityState(
             String(fieldValues.ClientCity ?? ""),
-            "",
-            ""
+            String(fieldValues.ClientState ?? "")
           );
         }
 
