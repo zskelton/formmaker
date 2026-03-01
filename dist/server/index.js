@@ -1,7 +1,10 @@
 import require$$0, { AsyncLocalStorage as AsyncLocalStorage$1 } from "node:async_hooks";
 import assetsManifest from "./__vite_rsc_assets_manifest.js";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { PDFDocument, PDFTextField, PDFCheckBox, PDFDropdown, PDFOptionList, PDFRadioGroup } from "pdf-lib";
+import { createCanvas } from "@napi-rs/canvas";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 function tinyassert(value, message) {
   if (value) return;
   if (message instanceof Error) throw message;
@@ -14507,6 +14510,78 @@ function MetadataHead({ metadata: metadata2 }) {
   }
   return jsxRuntime_reactServerExports.jsx(jsxRuntime_reactServerExports.Fragment, { children: elements });
 }
+function sitemapToXml(entries) {
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+  ];
+  for (const entry of entries) {
+    lines.push("  <url>");
+    lines.push(`    <loc>${escapeXml(entry.url)}</loc>`);
+    if (entry.lastModified) {
+      const date = entry.lastModified instanceof Date ? entry.lastModified.toISOString() : entry.lastModified;
+      lines.push(`    <lastmod>${escapeXml(date)}</lastmod>`);
+    }
+    if (entry.changeFrequency) {
+      lines.push(`    <changefreq>${escapeXml(entry.changeFrequency)}</changefreq>`);
+    }
+    if (entry.priority !== void 0) {
+      lines.push(`    <priority>${entry.priority}</priority>`);
+    }
+    if (entry.images) {
+      for (const image of entry.images) {
+        lines.push("    <image:image>");
+        lines.push(`      <image:loc>${escapeXml(image)}</image:loc>`);
+        lines.push("    </image:image>");
+      }
+    }
+    lines.push("  </url>");
+  }
+  lines.push("</urlset>");
+  return lines.join("\n");
+}
+function robotsToText(config) {
+  const lines = [];
+  const rules = Array.isArray(config.rules) ? config.rules : [config.rules];
+  for (const rule of rules) {
+    const agents = Array.isArray(rule.userAgent) ? rule.userAgent : [rule.userAgent ?? "*"];
+    for (const agent of agents) {
+      lines.push(`User-Agent: ${agent}`);
+    }
+    if (rule.allow) {
+      const allows = Array.isArray(rule.allow) ? rule.allow : [rule.allow];
+      for (const allow of allows) {
+        lines.push(`Allow: ${allow}`);
+      }
+    }
+    if (rule.disallow) {
+      const disallows = Array.isArray(rule.disallow) ? rule.disallow : [rule.disallow];
+      for (const disallow of disallows) {
+        lines.push(`Disallow: ${disallow}`);
+      }
+    }
+    if (rule.crawlDelay !== void 0) {
+      lines.push(`Crawl-delay: ${rule.crawlDelay}`);
+    }
+    lines.push("");
+  }
+  if (config.sitemap) {
+    const sitemaps = Array.isArray(config.sitemap) ? config.sitemap : [config.sitemap];
+    for (const sitemap of sitemaps) {
+      lines.push(`Sitemap: ${sitemap}`);
+    }
+  }
+  if (config.host) {
+    lines.push(`Host: ${config.host}`);
+  }
+  return lines.join("\n").trim() + "\n";
+}
+function manifestToJson(config) {
+  return JSON.stringify(config, null, 2);
+}
+function escapeXml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
 class MemoryCacheHandler {
   store = /* @__PURE__ */ new Map();
   tagRevalidatedAt = /* @__PURE__ */ new Map();
@@ -15140,34 +15215,82 @@ function getSSRFontStyles() {
 function getSSRFontPreloads() {
   return [...ssrFontPreloads];
 }
-async function GET(_request, context) {
-  const { file } = await context.params;
-  const decodedFile = decodeURIComponent(file);
-  if (!decodedFile.toLowerCase().endsWith(".pdf") || path.basename(decodedFile) !== decodedFile) {
-    return new Response("Invalid file name", { status: 400 });
+async function toImageBackedPdfBytes(inputBytes, scale = 2.1) {
+  const loadingTask = getDocument({
+    data: inputBytes,
+    useSystemFonts: true,
+    disableFontFace: true,
+    useWorkerFetch: false
+  });
+  const sourcePdf = await loadingTask.promise;
+  const outputPdf = await PDFDocument.create();
+  for (let pageIndex = 1; pageIndex <= sourcePdf.numPages; pageIndex += 1) {
+    const sourcePage = await sourcePdf.getPage(pageIndex);
+    const viewport = sourcePage.getViewport({ scale });
+    const width = Math.max(1, Math.ceil(viewport.width));
+    const height = Math.max(1, Math.ceil(viewport.height));
+    const canvas = createCanvas(width, height);
+    const context = canvas.getContext("2d");
+    await sourcePage.render({
+      canvasContext: context,
+      viewport
+    }).promise;
+    const pngBytes = canvas.toBuffer("image/png");
+    const embeddedPng = await outputPdf.embedPng(pngBytes);
+    const targetPage = outputPdf.addPage([viewport.width, viewport.height]);
+    targetPage.drawImage(embeddedPng, {
+      x: 0,
+      y: 0,
+      width: viewport.width,
+      height: viewport.height
+    });
+    sourcePage.cleanup();
   }
+  await loadingTask.destroy();
+  return outputPdf.save({ useObjectStreams: false });
+}
+async function GET$3() {
   const dataDir = path.resolve(process.cwd(), "app", "data");
-  const filePath = path.resolve(dataDir, decodedFile);
-  const relativePath = path.relative(dataDir, filePath);
-  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-    return new Response("Invalid file path", { status: 400 });
-  }
   try {
-    const content = await readFile(filePath);
-    return new Response(content, {
+    const entries = await readdir(dataDir, { withFileTypes: true });
+    const pdfFiles = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".pdf")).map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
+    if (pdfFiles.length === 0) {
+      return Response.json({ error: "No PDF files found" }, { status: 404 });
+    }
+    const mergedPdf = await PDFDocument.create();
+    for (const fileName of pdfFiles) {
+      const filePath = path.join(dataDir, fileName);
+      const content = await readFile(filePath);
+      const sourcePdf = await PDFDocument.load(content);
+      try {
+        const sourceForm = sourcePdf.getForm();
+        sourceForm.updateFieldAppearances();
+        sourceForm.flatten();
+      } catch {
+      }
+      const normalizedBytes = await sourcePdf.save({ useObjectStreams: false });
+      const normalizedPdf = await PDFDocument.load(normalizedBytes);
+      const copiedPages = await mergedPdf.copyPages(normalizedPdf, normalizedPdf.getPageIndices());
+      for (const page of copiedPages) {
+        mergedPdf.addPage(page);
+      }
+    }
+    const flattenedBytes = await mergedPdf.save({ useObjectStreams: false });
+    const mergedPdfBytes = await toImageBackedPdfBytes(flattenedBytes);
+    return new Response(Buffer.from(mergedPdfBytes), {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="${decodedFile}"`
+        "Content-Disposition": "attachment; filename=ROI-Forms-Merged.pdf"
       }
     });
   } catch {
-    return new Response("File not found", { status: 404 });
+    return Response.json({ error: "Unable to build merged PDF" }, { status: 500 });
   }
 }
 const mod_0 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
-  GET
+  GET: GET$3
 }, Symbol.toStringTag, { value: "Module" }));
 const RemoveDuplicateServerCss = void 0;
 const Resources = /* @__PURE__ */ ((React, deps, RemoveDuplicateServerCss2, precedence) => {
@@ -15187,8 +15310,12 @@ const Resources = /* @__PURE__ */ ((React, deps, RemoveDuplicateServerCss2, prec
   "vite-rsc/importer-resources"
 );
 let metadata = {
-  title: "Vinext Boilerplate",
-  description: "Next.js app running with vinext"
+  title: "Formmaker",
+  description: "Formmaker",
+  applicationName: "Formmaker",
+  icons: {
+    icon: "/icon.png"
+  }
 };
 function RootLayout({
   children
@@ -15214,6 +15341,339 @@ const mod_1 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePropert
   default: $$wrap_RootLayout,
   metadata
 }, Symbol.toStringTag, { value: "Module" }));
+async function GET$2(_request, context) {
+  const { file } = await context.params;
+  const decodedFile = decodeURIComponent(file);
+  if (!decodedFile.toLowerCase().endsWith(".pdf") || path.basename(decodedFile) !== decodedFile) {
+    return new Response("Invalid file name", { status: 400 });
+  }
+  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const filePath = path.resolve(dataDir, decodedFile);
+  const relativePath = path.relative(dataDir, filePath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return new Response("Invalid file path", { status: 400 });
+  }
+  try {
+    const content = await readFile(filePath);
+    const imageBackedBytes = await toImageBackedPdfBytes(new Uint8Array(content));
+    return new Response(Buffer.from(imageBackedBytes), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="${decodedFile.replace(/\.pdf$/i, "")}-print.pdf"`
+      }
+    });
+  } catch {
+    return new Response("File not found", { status: 404 });
+  }
+}
+const mod_2 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  GET: GET$2
+}, Symbol.toStringTag, { value: "Module" }));
+async function GET$1(_request, context) {
+  const { file } = await context.params;
+  const decodedFile = decodeURIComponent(file);
+  if (decodedFile === "download-all" || decodedFile === "download-all.pdf") {
+    const dataDir2 = path.resolve(process.cwd(), "app", "data");
+    try {
+      const entries = await readdir(dataDir2, { withFileTypes: true });
+      const pdfFiles = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".pdf")).map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
+      if (pdfFiles.length === 0) {
+        return new Response("No PDF files found", { status: 404 });
+      }
+      const mergedPdf = await PDFDocument.create();
+      for (const pdfFile of pdfFiles) {
+        const filePath2 = path.join(dataDir2, pdfFile);
+        const content = await readFile(filePath2);
+        const sourcePdf = await PDFDocument.load(content);
+        const copiedPages = await mergedPdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
+        for (const page of copiedPages) {
+          mergedPdf.addPage(page);
+        }
+      }
+      const flattenedBytes = await mergedPdf.save({ useObjectStreams: false });
+      const mergedPdfBytes = await toImageBackedPdfBytes(flattenedBytes);
+      return new Response(Buffer.from(mergedPdfBytes), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/pdf",
+          "Content-Disposition": "attachment; filename=ROI-Forms-Merged.pdf"
+        }
+      });
+    } catch {
+      return new Response("Unable to build merged PDF", { status: 500 });
+    }
+  }
+  if (!decodedFile.toLowerCase().endsWith(".pdf") || path.basename(decodedFile) !== decodedFile) {
+    return new Response("Invalid file name", { status: 400 });
+  }
+  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const filePath = path.resolve(dataDir, decodedFile);
+  const relativePath = path.relative(dataDir, filePath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return new Response("Invalid file path", { status: 400 });
+  }
+  try {
+    const content = await readFile(filePath);
+    return new Response(content, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `inline; filename="${decodedFile}"`
+      }
+    });
+  } catch {
+    return new Response("File not found", { status: 404 });
+  }
+}
+const mod_3 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  GET: GET$1
+}, Symbol.toStringTag, { value: "Module" }));
+function toReadableLabel(fieldName) {
+  const corrected = fieldName.replace(/Gaurdian/gi, "Guardian").replace(/Addres$/i, "Address");
+  const withSpaces = corrected.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/([A-Za-z])(\d)/g, "$1 $2").replace(/(\d)([A-Za-z])/g, "$1 $2").replace(/\s+/g, " ").trim();
+  return withSpaces.replace(/\bDob\b/g, "DOB").replace(/\bSsn\b/g, "SSN").replace(/\bZip\b/g, "ZIP").replace(/\bId\b/g, "ID");
+}
+function buildTextModule(fieldNames) {
+  return fieldNames.map((name) => ({
+    name,
+    label: toReadableLabel(name),
+    type: "text"
+  }));
+}
+const FORM_FIELD_MODULES = {
+  "csn_roi.pdf": buildTextModule([
+    "ClientNum",
+    "ClientName",
+    "ClientAddress",
+    "EntitiesAddition",
+    "EntitiesException",
+    "ClientDOB",
+    "RevocationAddress",
+    "RevocationCopySent",
+    "RevocationDate",
+    "RevokeReturnAddress",
+    "SignedDate",
+    "SignedPrintName",
+    "SignedTelephone",
+    "CopyToGuardianAddress",
+    "CopyToGaurdianDate"
+  ]),
+  "goodneighbor_roi.pdf": buildTextModule([
+    "ClientLastName",
+    "ClientFirstName",
+    "ClientMiddleInit",
+    "ClientState",
+    "ClientZip",
+    "ClientAddress",
+    "ClientDOB",
+    "ClientSSN",
+    "ClientPhone",
+    "Dep1Name",
+    "Dep1DOB",
+    "Dep2Name",
+    "Dep1SSN",
+    "Dep3Name",
+    "Dep4Name",
+    "Dep5Name",
+    "Dep1Relationship",
+    "Dep2Relationship",
+    "Dep4Relationship",
+    "Dep3Relationship",
+    "Dep5Relationship",
+    "Dep2DOB",
+    "Dep3DOB",
+    "Dep4DOB",
+    "Dep2SSN",
+    "Dep3SSN",
+    "Dep5SSN",
+    "Dep4SSN",
+    "Dep5DOB",
+    "AgencySignedDate",
+    "ClientSignedDate"
+  ]),
+  "storycounty_roi.pdf": buildTextModule([
+    "RevokeDate",
+    "SignedDate",
+    "SignedName",
+    "SignedTelephone",
+    "ExpirationDate",
+    "ClientName",
+    "ClientAddres",
+    "ClientDOB"
+  ])
+};
+function getModuleFieldsForFile(fileName) {
+  return FORM_FIELD_MODULES[fileName.toLowerCase()] ?? [];
+}
+function resolvePdfPath$1(rawFile) {
+  const decodedFile = decodeURIComponent(rawFile);
+  if (!decodedFile.toLowerCase().endsWith(".pdf") || path.basename(decodedFile) !== decodedFile) {
+    return null;
+  }
+  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const filePath = path.resolve(dataDir, decodedFile);
+  const relativePath = path.relative(dataDir, filePath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return null;
+  }
+  return { filePath, decodedFile };
+}
+async function GET(_request, context) {
+  const { file } = await context.params;
+  const resolved = resolvePdfPath$1(file);
+  if (!resolved) {
+    return Response.json({ error: "Invalid file name" }, { status: 400 });
+  }
+  try {
+    const sourcePdf = await readFile(resolved.filePath);
+    const pdfDoc = await PDFDocument.load(sourcePdf);
+    const form = pdfDoc.getForm();
+    const fields = [];
+    for (const field of form.getFields()) {
+      const fieldName = field.getName();
+      if (field instanceof PDFTextField) {
+        fields.push({ name: fieldName, type: "text", value: field.getText() ?? "" });
+        continue;
+      }
+      if (field instanceof PDFCheckBox) {
+        fields.push({ name: fieldName, type: "checkbox", value: field.isChecked() });
+        continue;
+      }
+      if (field instanceof PDFDropdown) {
+        const selected = field.getSelected();
+        fields.push({
+          name: fieldName,
+          type: "dropdown",
+          options: field.getOptions(),
+          value: selected[0] ?? ""
+        });
+        continue;
+      }
+      if (field instanceof PDFOptionList) {
+        const selected = field.getSelected();
+        fields.push({
+          name: fieldName,
+          type: "optionList",
+          options: field.getOptions(),
+          value: selected[0] ?? ""
+        });
+        continue;
+      }
+      if (field instanceof PDFRadioGroup) {
+        fields.push({
+          name: fieldName,
+          type: "radio",
+          options: field.getOptions(),
+          value: field.getSelected() ?? ""
+        });
+      }
+    }
+    if (fields.length > 0) {
+      return Response.json({ fields });
+    }
+    const fallbackFields = getModuleFieldsForFile(resolved.decodedFile);
+    return Response.json({ fields: fallbackFields });
+  } catch {
+    const fallbackFields = getModuleFieldsForFile(resolved.decodedFile);
+    if (fallbackFields.length > 0) {
+      return Response.json({ fields: fallbackFields });
+    }
+    return Response.json({ error: "Unable to read PDF fields" }, { status: 500 });
+  }
+}
+const mod_4 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  GET
+}, Symbol.toStringTag, { value: "Module" }));
+function resolvePdfPath(rawFile) {
+  const decodedFile = decodeURIComponent(rawFile);
+  if (!decodedFile.toLowerCase().endsWith(".pdf") || path.basename(decodedFile) !== decodedFile) {
+    return null;
+  }
+  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const filePath = path.resolve(dataDir, decodedFile);
+  const relativePath = path.relative(dataDir, filePath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return null;
+  }
+  return { filePath, decodedFile };
+}
+async function POST(request, context) {
+  const { file } = await context.params;
+  const resolved = resolvePdfPath(file);
+  if (!resolved) {
+    return Response.json({ error: "Invalid file name" }, { status: 400 });
+  }
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return Response.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  const values = payload.values ?? {};
+  try {
+    const sourcePdf = await readFile(resolved.filePath);
+    const pdfDoc = await PDFDocument.load(sourcePdf);
+    const form = pdfDoc.getForm();
+    for (const field of form.getFields()) {
+      const fieldName = field.getName();
+      const rawValue = values[fieldName];
+      if (rawValue === void 0 || rawValue === null) {
+        continue;
+      }
+      if (field instanceof PDFTextField) {
+        field.setText(String(rawValue));
+        continue;
+      }
+      if (field instanceof PDFCheckBox) {
+        if (rawValue === true || rawValue === "true") {
+          field.check();
+        } else {
+          field.uncheck();
+        }
+        continue;
+      }
+      if (field instanceof PDFDropdown) {
+        const value = String(rawValue);
+        if (value) {
+          field.select(value);
+        }
+        continue;
+      }
+      if (field instanceof PDFOptionList) {
+        if (Array.isArray(rawValue)) {
+          if (rawValue.length > 0) {
+            field.select(rawValue.map((item) => String(item)));
+          }
+        } else {
+          const value = String(rawValue);
+          if (value) {
+            field.select(value);
+          }
+        }
+        continue;
+      }
+      if (field instanceof PDFRadioGroup) {
+        const value = String(rawValue);
+        if (value) {
+          field.select(value);
+        }
+      }
+    }
+    const outputPdfBytes = await pdfDoc.save({ useObjectStreams: false });
+    await writeFile(resolved.filePath, outputPdfBytes);
+    return Response.json({ ok: true, updatedAt: Date.now() });
+  } catch {
+    return Response.json({ error: "Unable to apply changes to PDF" }, { status: 500 });
+  }
+}
+const mod_5 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  POST
+}, Symbol.toStringTag, { value: "Module" }));
 const PdfBrowser = /* @__PURE__ */ registerClientReference(() => {
   throw new Error("Unexpectedly client reference export 'default' is called on server");
 }, "f1cda7d4d39d", "default");
@@ -15221,9 +15681,13 @@ async function Home() {
   const dataDir = path.join(process.cwd(), "app", "data");
   const entries = await readdir(dataDir, { withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".pdf")).map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
-  return /* @__PURE__ */ jsxRuntime_reactServerExports.jsx("main", { className: "viewerPage", children: /* @__PURE__ */ jsxRuntime_reactServerExports.jsx(PdfBrowser, { files }) });
+  return /* @__PURE__ */ jsxRuntime_reactServerExports.jsxs("main", { className: "viewerPage", children: [
+    /* @__PURE__ */ jsxRuntime_reactServerExports.jsx("header", { className: "pageHeader", children: /* @__PURE__ */ jsxRuntime_reactServerExports.jsx("h1", { children: "Release of Information" }) }),
+    /* @__PURE__ */ jsxRuntime_reactServerExports.jsx(PdfBrowser, { files }),
+    /* @__PURE__ */ jsxRuntime_reactServerExports.jsx("div", { className: "pageTag", children: "Skelton Networks © 2026" })
+  ] });
 }
-const mod_2 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+const mod_6 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   default: Home
 }, Symbol.toStringTag, { value: "Module" }));
@@ -15274,11 +15738,83 @@ function rscOnError(error) {
 }
 const routes = [
   {
+    pattern: "/api/pdfs/download-all",
+    isDynamic: false,
+    params: [],
+    page: null,
+    routeHandler: mod_0,
+    layouts: [mod_1],
+    layoutSegmentDepths: [0],
+    templates: [],
+    errors: [null],
+    slots: {},
+    loading: null,
+    error: null,
+    notFound: null,
+    notFounds: [null],
+    forbidden: null,
+    unauthorized: null
+  },
+  {
+    pattern: "/api/pdfs/print/:file",
+    isDynamic: true,
+    params: ["file"],
+    page: null,
+    routeHandler: mod_2,
+    layouts: [mod_1],
+    layoutSegmentDepths: [0],
+    templates: [],
+    errors: [null],
+    slots: {},
+    loading: null,
+    error: null,
+    notFound: null,
+    notFounds: [null],
+    forbidden: null,
+    unauthorized: null
+  },
+  {
     pattern: "/api/pdfs/:file",
     isDynamic: true,
     params: ["file"],
     page: null,
-    routeHandler: mod_0,
+    routeHandler: mod_3,
+    layouts: [mod_1],
+    layoutSegmentDepths: [0],
+    templates: [],
+    errors: [null],
+    slots: {},
+    loading: null,
+    error: null,
+    notFound: null,
+    notFounds: [null],
+    forbidden: null,
+    unauthorized: null
+  },
+  {
+    pattern: "/api/pdfs/:file/fields",
+    isDynamic: true,
+    params: ["file"],
+    page: null,
+    routeHandler: mod_4,
+    layouts: [mod_1],
+    layoutSegmentDepths: [0],
+    templates: [],
+    errors: [null],
+    slots: {},
+    loading: null,
+    error: null,
+    notFound: null,
+    notFounds: [null],
+    forbidden: null,
+    unauthorized: null
+  },
+  {
+    pattern: "/api/pdfs/:file/save",
+    isDynamic: true,
+    params: ["file"],
+    page: null,
+    routeHandler: mod_5,
     layouts: [mod_1],
     layoutSegmentDepths: [0],
     templates: [],
@@ -15295,7 +15831,7 @@ const routes = [
     pattern: "/",
     isDynamic: false,
     params: [],
-    page: mod_2,
+    page: mod_6,
     routeHandler: null,
     layouts: [mod_1],
     layoutSegmentDepths: [0],
@@ -15310,7 +15846,15 @@ const routes = [
     unauthorized: null
   }
 ];
-const metadataRoutes = [];
+const metadataRoutes = [
+  {
+    type: "icon",
+    isDynamic: false,
+    servedUrl: "/icon",
+    contentType: "image/png",
+    fileDataBase64: "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAYAAABccqhmAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAw7SURBVHhe7d3/y511Hcdx/4zMQqIMNzOiYl+IkblSt1o421BcLCGTSYtgmfrDhtkIo0jURV80WoFrMHAJsihKioE1ycSEWFR+C7PSvqzMRWt5xfvAuTmf13Wuc3+uc93XuT6f9+f5hgdj27nvyf2+rud97ut88ZxXzzxbASjTOfoHAMpBAICCEQCgYAQAKBgBAApGAICCEQCgYAQAKBgBAApGAICCEQCgYAQAKBgBAApGAICCEQCgYAQAKBgBAApGAICCEQCgYAQAKBgBAApGAICCEQCgYAQAKBgBAApGAICCEQCgYAQAKBgBAArmPgAnHj1aHfjaXmAudvzoMeWJ+wDYEi9c8xpgLnb86DHlCQEAZiAAmSMA6IIAZI4AoAsCkDkCgC4IQOaaArBl43nVnq3nAyN2POgxQgAcaAqALf1Huy8ARux40GOEADhAABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADhFABCDADjVFIAtG88bLV0d3n9N9dSxe+CU7Vd3bux40GOEADjQFIAmB+79YsX4Hduv7nwWApA5AsBMDgEIEQBdOAFwPQQgRAB04QTA9RCAEAHQhRMA10MAQgRAF04AXA8BCBEAXTgBcD0EIEQAdOEEwPUQgBAB0IUTANdDAEIEQBdOAFwPAQgRAF04AXA9BCBEAHThBMD1EIAQAdCFEwDXQwBCBEAXTgBcDwEIEQBdOAFwPQQgRAB04QTA9RCAEAHQhRMA10MAQgRAF04AXA8BCBEAXTgBcD0EIEQAdOEtA3DyN7+ovnvsPgzEvv5thgCECIAuvGUA7CC8bvc6DMS+/m2GAIQIgC6cAGSFAHRDAHThBCArBKAbAqAL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"
+  }
+];
 const rootNotFoundModule = null;
 const rootForbiddenModule = null;
 const rootUnauthorizedModule = null;

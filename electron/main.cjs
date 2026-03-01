@@ -1,6 +1,7 @@
-const { app, BrowserWindow, nativeImage } = require("electron");
-const { spawn } = require("node:child_process");
+const { app, BrowserWindow, nativeImage, dialog } = require("electron");
+const { existsSync } = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 
 const APP_NAME = "Formmaker";
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || "http://localhost:3417";
@@ -8,7 +9,7 @@ const PROD_PORT = 3417;
 
 let mainWindow = null;
 let splashWindow = null;
-let serverProcess = null;
+let prodServerHandle = null;
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -17,6 +18,64 @@ if (!hasSingleInstanceLock) {
 }
 
 app.setName(APP_NAME);
+
+function getRuntimeDir() {
+  return app.getAppPath();
+}
+
+function resolveVinextProdServerPath() {
+  const appPath = app.getAppPath();
+  const resourcesPath = process.resourcesPath;
+  const vinextProdServerCandidates = [
+    path.join(appPath, "node_modules", "vinext", "dist", "server", "prod-server.js"),
+    path.join(resourcesPath, "app.asar", "node_modules", "vinext", "dist", "server", "prod-server.js"),
+    path.join(resourcesPath, "app", "node_modules", "vinext", "dist", "server", "prod-server.js")
+  ];
+
+  return vinextProdServerCandidates.find((candidate) => existsSync(candidate));
+}
+
+function runPackagedSelfCheck() {
+  const runtimeDir = getRuntimeDir();
+  const expectedDistDir = path.join(runtimeDir, "dist");
+  const expectedDataDir = path.join(runtimeDir, "app", "data");
+  const vinextProdServerPath = resolveVinextProdServerPath();
+
+  const issues = [];
+
+  if (!existsSync(expectedDistDir)) {
+    issues.push(`Missing runtime build output: ${expectedDistDir}`);
+  }
+
+  if (!existsSync(expectedDataDir)) {
+    issues.push(`Missing PDF data directory: ${expectedDataDir}`);
+  }
+
+  if (!vinextProdServerPath) {
+    issues.push("Missing vinext production server module in packaged resources");
+  }
+
+  return {
+    issues,
+    runtimeDir,
+    expectedDistDir,
+    expectedDataDir,
+    vinextProdServerPath: vinextProdServerPath ?? "not-found"
+  };
+}
+
+function showStartupErrorDialog(error, diagnostics) {
+  const extra = diagnostics
+    ? `\n\nDiagnostics:\n- Runtime Dir: ${diagnostics.runtimeDir}\n- Dist Dir: ${diagnostics.expectedDistDir}\n- Data Dir: ${diagnostics.expectedDataDir}\n- Vinext Prod Server: ${diagnostics.vinextProdServerPath}`
+    : "";
+
+  const details = `${error instanceof Error ? error.message : String(error)}${extra}`;
+
+  dialog.showErrorBox(
+    "Formmaker Startup Error",
+    `Formmaker could not start on this computer.\n\n${details}\n\nPlease reinstall from the latest installer and try again.`
+  );
+}
 
 function getIconPath() {
   return path.join(app.getAppPath(), "app", "icon.png");
@@ -171,29 +230,37 @@ function waitForServer(url, timeoutMs = 45000) {
 }
 
 async function startProdServer() {
-  if (serverProcess) {
+  if (prodServerHandle) {
     return;
   }
 
-  const appPath = app.getAppPath();
-  const vinextCliPath = path.join(appPath, "node_modules", "vinext", "dist", "cli.js");
+  const runtimeDir = getRuntimeDir();
+  const vinextProdServerPath = resolveVinextProdServerPath();
+  const outDir = path.join(runtimeDir, "dist");
 
-  serverProcess = spawn(
-    process.execPath,
-    [vinextCliPath, "start", "--port", String(PROD_PORT), "--strict-port"],
-    {
-      cwd: appPath,
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: "1"
-      },
-      windowsHide: true,
-      stdio: "pipe"
-    }
-  );
+  if (!vinextProdServerPath) {
+    throw new Error("Unable to locate vinext production server module in packaged app resources");
+  }
 
-  serverProcess.on("exit", () => {
-    serverProcess = null;
+  const vinextServerModule = await import(pathToFileURL(vinextProdServerPath).href);
+  const startVinextProdServer = vinextServerModule?.startProdServer;
+
+  if (typeof startVinextProdServer !== "function") {
+    throw new Error("Vinext production server module does not export startProdServer");
+  }
+
+  prodServerHandle = await startVinextProdServer({
+    port: PROD_PORT,
+    host: "127.0.0.1",
+    outDir
+  });
+
+  if (!prodServerHandle || typeof prodServerHandle.close !== "function") {
+    throw new Error("Vinext production server did not return a closable server handle");
+  }
+
+  prodServerHandle.on?.("error", (error) => {
+    console.error("Vinext production server error:", error);
   });
 
   await waitForServer(`http://127.0.0.1:${PROD_PORT}`);
@@ -259,22 +326,17 @@ async function createMainWindow() {
 }
 
 function stopServerProcess() {
-  if (!serverProcess || !serverProcess.pid) {
+  if (!prodServerHandle) {
     return;
   }
 
-  const pid = serverProcess.pid;
-
-  if (process.platform === "win32") {
-    spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
-      windowsHide: true,
-      stdio: "ignore"
-    });
-  } else {
-    serverProcess.kill();
+  try {
+    prodServerHandle.close();
+  } catch (error) {
+    console.error("Failed to close production server handle:", error);
   }
 
-  serverProcess = null;
+  prodServerHandle = null;
 }
 
 if (hasSingleInstanceLock) {
@@ -289,12 +351,23 @@ if (hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    let diagnostics = null;
+
     try {
+      if (app.isPackaged) {
+        diagnostics = runPackagedSelfCheck();
+
+        if (diagnostics.issues.length > 0) {
+          throw new Error(diagnostics.issues.join("\n"));
+        }
+      }
+
       createSplashWindow();
       await createMainWindow();
     } catch (error) {
       console.error("Failed to start Formmaker desktop app:", error);
       closeSplashWindow();
+      showStartupErrorDialog(error, diagnostics);
       app.quit();
     }
   });

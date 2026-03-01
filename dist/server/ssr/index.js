@@ -5294,15 +5294,15 @@ function createFromReadableStream(stream, options = {}) {
 }
 const clientReferences = {
   "f1cda7d4d39d": async () => {
-    const m = await import("./assets/facade__virtual_vinext-rsc-entry-C9faeabj.js");
+    const m = await import("./assets/facade__virtual_vinext-rsc-entry-CLXX_ss0.js");
     return m.export_f1cda7d4d39d;
   },
   "f29e6e234fea": async () => {
-    const m = await import("./assets/facade__virtual_vinext-rsc-entry-C9faeabj.js");
+    const m = await import("./assets/facade__virtual_vinext-rsc-entry-CLXX_ss0.js");
     return m.export_f29e6e234fea;
   },
   "0deffcb8ffd7": async () => {
-    const m = await import("./assets/facade__virtual_vinext-rsc-entry-C9faeabj.js");
+    const m = await import("./assets/facade__virtual_vinext-rsc-entry-CLXX_ss0.js");
     return m.export_0deffcb8ffd7;
   }
 };
