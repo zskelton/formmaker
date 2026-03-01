@@ -2,10 +2,15 @@
 
 Desktop form-filling app for Windows (Electron + Vinext) with print-safe PDF download support.
 
+## Maintainer Docs
+
+- [Maintainer Guide](docs/MAINTAINER_GUIDE.md)
+- [Changelog](CHANGELOG.md)
+
 ## Download (GitHub Releases)
 
 - **Latest release page:** [GitHub Releases](https://github.com/zskelton/formmaker/releases/latest)
-- **Latest installer (NSIS):** [Formmaker Setup 1.0.0.exe](https://github.com/zskelton/formmaker/releases/latest/download/Formmaker%20Setup%201.0.0.exe)
+- **Latest installer (NSIS):** [Formmaker Setup 1.0.1.exe](https://github.com/zskelton/formmaker/releases/latest/download/Formmaker%20Setup%201.0.1.exe)
 
 > After you publish newer versions, the latest release page link always stays current.
 
@@ -19,7 +24,7 @@ Desktop form-filling app for Windows (Electron + Vinext) with print-safe PDF dow
 ## Install (Windows)
 
 1. Download the latest installer from the release page.
-2. Run `Formmaker Setup 1.0.0.exe`.
+2. Run `Formmaker Setup 1.0.1.exe`.
 3. Launch **Formmaker** from Start Menu.
 
 ## How to use
@@ -34,7 +39,7 @@ Desktop form-filling app for Windows (Electron + Vinext) with print-safe PDF dow
 
 Use this checklist before publishing a release:
 
-- [ ] Installer file exists (`Formmaker Setup 1.0.0.exe`) in release artifacts.
+- [ ] Installer file exists (`Formmaker Setup 1.0.1.exe`) in release artifacts.
 - [ ] Fresh install on Windows completes successfully.
 - [ ] App launches and remains open (no splash crash).
 - [ ] At least one form opens with expected default structure.
@@ -85,8 +90,8 @@ This repo includes a GitHub Actions workflow to build and publish installer asse
 3. Click **Draft a new release**.
 4. Set tag (example `v1.0.1`) and title.
 5. Upload from local `release/`:
-   - `Formmaker Setup 1.0.0.exe`
-   - `Formmaker Setup 1.0.0.exe.blockmap`
+   - `Formmaker Setup 1.0.1.exe`
+   - `Formmaker Setup 1.0.1.exe.blockmap`
    - `latest.yml`
 6. Publish release.
 

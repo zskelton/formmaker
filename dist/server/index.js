@@ -5,6 +5,7 @@ import path from "node:path";
 import { PDFDocument, PDFTextField, PDFCheckBox, PDFDropdown, PDFOptionList, PDFRadioGroup } from "pdf-lib";
 import { createCanvas } from "@napi-rs/canvas";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { existsSync } from "node:fs";
 function tinyassert(value, message) {
   if (value) return;
   if (message instanceof Error) throw message;
@@ -15249,8 +15250,32 @@ async function toImageBackedPdfBytes(inputBytes, scale = 2.1) {
   await loadingTask.destroy();
   return outputPdf.save({ useObjectStreams: false });
 }
+function buildDataDirCandidates() {
+  const cwd = process.cwd();
+  const candidates = [
+    path.resolve(cwd, "app", "data"),
+    path.resolve(cwd, "data")
+  ];
+  if (process.resourcesPath) {
+    candidates.push(
+      path.join(process.resourcesPath, "app.asar", "app", "data"),
+      path.join(process.resourcesPath, "app", "data"),
+      path.join(process.resourcesPath, "data")
+    );
+  }
+  return candidates;
+}
+function getPdfDataDir() {
+  const override = process.env.FORMMAKER_DATA_DIR;
+  if (override && existsSync(override)) {
+    return override;
+  }
+  const candidates = buildDataDirCandidates();
+  const match = candidates.find((candidate) => existsSync(candidate));
+  return match ?? candidates[0];
+}
 async function GET$3() {
-  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
   try {
     const entries = await readdir(dataDir, { withFileTypes: true });
     const pdfFiles = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".pdf")).map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
@@ -15347,7 +15372,7 @@ async function GET$2(_request, context) {
   if (!decodedFile.toLowerCase().endsWith(".pdf") || path.basename(decodedFile) !== decodedFile) {
     return new Response("Invalid file name", { status: 400 });
   }
-  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
   const filePath = path.resolve(dataDir, decodedFile);
   const relativePath = path.relative(dataDir, filePath);
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
@@ -15375,7 +15400,7 @@ async function GET$1(_request, context) {
   const { file } = await context.params;
   const decodedFile = decodeURIComponent(file);
   if (decodedFile === "download-all" || decodedFile === "download-all.pdf") {
-    const dataDir2 = path.resolve(process.cwd(), "app", "data");
+    const dataDir2 = getPdfDataDir();
     try {
       const entries = await readdir(dataDir2, { withFileTypes: true });
       const pdfFiles = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".pdf")).map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
@@ -15408,7 +15433,7 @@ async function GET$1(_request, context) {
   if (!decodedFile.toLowerCase().endsWith(".pdf") || path.basename(decodedFile) !== decodedFile) {
     return new Response("Invalid file name", { status: 400 });
   }
-  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
   const filePath = path.resolve(dataDir, decodedFile);
   const relativePath = path.relative(dataDir, filePath);
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
@@ -15513,7 +15538,7 @@ function resolvePdfPath$1(rawFile) {
   if (!decodedFile.toLowerCase().endsWith(".pdf") || path.basename(decodedFile) !== decodedFile) {
     return null;
   }
-  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
   const filePath = path.resolve(dataDir, decodedFile);
   const relativePath = path.relative(dataDir, filePath);
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
@@ -15593,7 +15618,7 @@ function resolvePdfPath(rawFile) {
   if (!decodedFile.toLowerCase().endsWith(".pdf") || path.basename(decodedFile) !== decodedFile) {
     return null;
   }
-  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
   const filePath = path.resolve(dataDir, decodedFile);
   const relativePath = path.relative(dataDir, filePath);
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
@@ -15678,7 +15703,7 @@ const PdfBrowser = /* @__PURE__ */ registerClientReference(() => {
   throw new Error("Unexpectedly client reference export 'default' is called on server");
 }, "f1cda7d4d39d", "default");
 async function Home() {
-  const dataDir = path.join(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
   const entries = await readdir(dataDir, { withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".pdf")).map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
   return /* @__PURE__ */ jsxRuntime_reactServerExports.jsxs("main", { className: "viewerPage", children: [

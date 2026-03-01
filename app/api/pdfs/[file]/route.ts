@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { PDFDocument } from "pdf-lib";
 import { toImageBackedPdfBytes } from "../../../lib/pdf-print-safe";
+import { getPdfDataDir } from "../../../lib/pdf-data-dir";
 
 type RouteContext = {
   params: Promise<{ file: string }>;
@@ -12,7 +13,7 @@ export async function GET(_request: Request, context: RouteContext) {
   const decodedFile = decodeURIComponent(file);
 
   if (decodedFile === "download-all" || decodedFile === "download-all.pdf") {
-    const dataDir = path.resolve(process.cwd(), "app", "data");
+    const dataDir = getPdfDataDir();
 
     try {
       const entries = await readdir(dataDir, { withFileTypes: true });
@@ -57,7 +58,7 @@ export async function GET(_request: Request, context: RouteContext) {
     return new Response("Invalid file name", { status: 400 });
   }
 
-  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
   const filePath = path.resolve(dataDir, decodedFile);
   const relativePath = path.relative(dataDir, filePath);
 

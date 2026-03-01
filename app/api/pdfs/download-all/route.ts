@@ -2,9 +2,10 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { PDFDocument } from "pdf-lib";
 import { toImageBackedPdfBytes } from "../../../lib/pdf-print-safe";
+import { getPdfDataDir } from "../../../lib/pdf-data-dir";
 
 export async function GET() {
-  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
 
   try {
     const entries = await readdir(dataDir, { withFileTypes: true });

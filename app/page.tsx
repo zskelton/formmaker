@@ -1,9 +1,9 @@
 import { readdir } from "node:fs/promises";
-import path from "node:path";
 import PdfBrowser from "./pdf-browser";
+import { getPdfDataDir } from "./lib/pdf-data-dir";
 
 export default async function Home() {
-  const dataDir = path.join(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
   const entries = await readdir(dataDir, { withFileTypes: true });
   const files = entries
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".pdf"))

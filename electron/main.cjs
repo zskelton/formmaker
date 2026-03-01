@@ -1,15 +1,17 @@
 const { app, BrowserWindow, nativeImage, dialog } = require("electron");
-const { existsSync } = require("node:fs");
+const { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 
 const APP_NAME = "Formmaker";
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || "http://localhost:3417";
+const PROD_HOST = "127.0.0.1";
 const PROD_PORT = 3417;
 
 let mainWindow = null;
 let splashWindow = null;
 let prodServerHandle = null;
+let prodServerUrl = `http://${PROD_HOST}:${PROD_PORT}`;
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -23,6 +25,8 @@ function getRuntimeDir() {
   return app.getAppPath();
 }
 
+// In packaged mode, Vinext may be reachable from app.asar or unpacked resources.
+// Keep a small candidate list instead of assuming one location.
 function resolveVinextProdServerPath() {
   const appPath = app.getAppPath();
   const resourcesPath = process.resourcesPath;
@@ -62,6 +66,59 @@ function runPackagedSelfCheck() {
     expectedDataDir,
     vinextProdServerPath: vinextProdServerPath ?? "not-found"
   };
+}
+
+// Source PDFs are shipped with the app, but their exact packaged path can vary
+// between builds/environments. Resolve the first existing location.
+function resolveBundledDataDir() {
+  const runtimeDir = getRuntimeDir();
+  const candidates = [
+    path.join(runtimeDir, "app", "data"),
+    path.join(runtimeDir, "data"),
+    path.join(process.resourcesPath, "app", "data"),
+    path.join(process.resourcesPath, "data")
+  ];
+
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}
+
+// Installed apps cannot reliably write inside packaged resources. Copy PDFs to a
+// writable userData folder once, then point API routes at that folder via env.
+function ensureWritablePdfDataDir() {
+  const writableDataDir = path.join(app.getPath("userData"), "data");
+  const bundledDataDir = resolveBundledDataDir();
+
+  mkdirSync(writableDataDir, { recursive: true });
+
+  const copyRecursively = (sourceDir, targetDir) => {
+    const entries = readdirSync(sourceDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const sourcePath = path.join(sourceDir, entry.name);
+      const targetPath = path.join(targetDir, entry.name);
+
+      if (entry.isDirectory()) {
+        mkdirSync(targetPath, { recursive: true });
+        copyRecursively(sourcePath, targetPath);
+        continue;
+      }
+
+      if (!existsSync(targetPath)) {
+        writeFileSync(targetPath, readFileSync(sourcePath));
+      }
+    }
+  };
+
+  if (existsSync(bundledDataDir)) {
+    try {
+      copyRecursively(bundledDataDir, writableDataDir);
+    } catch (error) {
+      console.error("Failed to copy bundled PDF data files:", error);
+    }
+  }
+
+  process.env.FORMMAKER_DATA_DIR = writableDataDir;
+  return { writableDataDir, bundledDataDir };
 }
 
 function showStartupErrorDialog(error, diagnostics) {
@@ -202,33 +259,6 @@ function closeSplashWindow() {
   splashWindow = null;
 }
 
-function waitForServer(url, timeoutMs = 45000) {
-  const startedAt = Date.now();
-
-  return new Promise((resolve, reject) => {
-    const poll = async () => {
-      if (Date.now() - startedAt > timeoutMs) {
-        reject(new Error("Timed out waiting for server"));
-        return;
-      }
-
-      try {
-        const response = await fetch(url);
-
-        if (response.ok || response.status < 500) {
-          resolve();
-          return;
-        }
-      } catch {
-      }
-
-      setTimeout(poll, 350);
-    };
-
-    poll();
-  });
-}
-
 async function startProdServer() {
   if (prodServerHandle) {
     return;
@@ -249,9 +279,14 @@ async function startProdServer() {
     throw new Error("Vinext production server module does not export startProdServer");
   }
 
+  // Force production mode to avoid React RSC dev/prod payload mismatches
+  // (which can render UI but break interactivity/click handlers).
+  process.env.NODE_ENV = "production";
+
   prodServerHandle = await startVinextProdServer({
-    port: PROD_PORT,
-    host: "127.0.0.1",
+    // Use an ephemeral local port to avoid collisions on user machines.
+    port: 0,
+    host: PROD_HOST,
     outDir
   });
 
@@ -259,11 +294,15 @@ async function startProdServer() {
     throw new Error("Vinext production server did not return a closable server handle");
   }
 
+  const address = prodServerHandle.address?.();
+  const activePort = typeof address === "object" && address && typeof address.port === "number"
+    ? address.port
+    : PROD_PORT;
+  prodServerUrl = `http://${PROD_HOST}:${activePort}`;
+
   prodServerHandle.on?.("error", (error) => {
     console.error("Vinext production server error:", error);
   });
-
-  await waitForServer(`http://127.0.0.1:${PROD_PORT}`);
 }
 
 async function createMainWindow() {
@@ -305,9 +344,10 @@ async function createMainWindow() {
     }
   });
 
-  const targetUrl = app.isPackaged ? `http://localhost:${PROD_PORT}` : DEV_URL;
+  const targetUrl = app.isPackaged ? prodServerUrl : DEV_URL;
 
-  const maxAttempts = app.isPackaged ? 1 : 15;
+  // Retry URL load to absorb brief server warm-up on slower systems.
+  const maxAttempts = 15;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       await mainWindow.loadURL(targetUrl);
@@ -360,6 +400,8 @@ if (hasSingleInstanceLock) {
         if (diagnostics.issues.length > 0) {
           throw new Error(diagnostics.issues.join("\n"));
         }
+
+        ensureWritablePdfDataDir();
       }
 
       createSplashWindow();

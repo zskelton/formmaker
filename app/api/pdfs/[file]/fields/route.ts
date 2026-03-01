@@ -9,6 +9,7 @@ import {
   PDFTextField
 } from "pdf-lib";
 import { getModuleFieldsForFile } from "../../../../lib/form-field-modules";
+import { getPdfDataDir } from "../../../../lib/pdf-data-dir";
 
 type RouteContext = {
   params: Promise<{ file: string }>;
@@ -29,7 +30,7 @@ function resolvePdfPath(rawFile: string) {
     return null;
   }
 
-  const dataDir = path.resolve(process.cwd(), "app", "data");
+  const dataDir = getPdfDataDir();
   const filePath = path.resolve(dataDir, decodedFile);
   const relativePath = path.relative(dataDir, filePath);
 
