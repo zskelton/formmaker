@@ -103,8 +103,17 @@ function ensureWritablePdfDataDir() {
         continue;
       }
 
+      const sourceBytes = readFileSync(sourcePath);
+
       if (!existsSync(targetPath)) {
-        writeFileSync(targetPath, readFileSync(sourcePath));
+        writeFileSync(targetPath, sourceBytes);
+        continue;
+      }
+
+      const targetBytes = readFileSync(targetPath);
+
+      if (!sourceBytes.equals(targetBytes)) {
+        writeFileSync(targetPath, sourceBytes);
       }
     }
   };
